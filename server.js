@@ -27,6 +27,10 @@ const {
   requestSizeLimiter,
   secureCors,
   logSecurityEvent,
+  checkAccountLockout,
+  recordFailedLogin,
+  resetFailedLoginAttempts,
+  validatePassword,
 } = require('./middleware/security');
 const {
   healthCheck,
@@ -42,6 +46,7 @@ const {
   invalidateTrucksCache,
   performanceMonitor,
   compressionMetrics,
+  responseCacheHeaders,
 } = require('./middleware/performance');
 require('dotenv').config();
 
@@ -95,6 +100,24 @@ if (createAdapter) {
 }
 
 const PORT = process.env.PORT || 3001;
+
+// Validate JWT secrets on startup (critical for security)
+if (process.env.NODE_ENV === 'production') {
+  if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'your-secret-key-change-in-production') {
+    throw new Error('JWT_SECRET must be set in production and must not be the default value');
+  }
+  if (!process.env.JWT_REFRESH_SECRET || process.env.JWT_REFRESH_SECRET === 'your-refresh-secret-key-change-in-production') {
+    throw new Error('JWT_REFRESH_SECRET must be set in production and must not be the default value');
+  }
+  // Validate secret strength (minimum 32 characters)
+  if (process.env.JWT_SECRET.length < 32) {
+    throw new Error('JWT_SECRET must be at least 32 characters long for production');
+  }
+  if (process.env.JWT_REFRESH_SECRET.length < 32) {
+    throw new Error('JWT_REFRESH_SECRET must be at least 32 characters long for production');
+  }
+}
+
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'your-refresh-secret-key-change-in-production';
 
@@ -133,6 +156,7 @@ app.use(requestSizeLimiter('10mb')); // Request size limiting
 app.use(requestTimeout(30000)); // Request timeout (30 seconds)
 app.use(performanceMonitor); // Performance monitoring
 app.use(compressionMetrics); // Compression metrics
+app.use(responseCacheHeaders); // Response caching headers
 
 // Helper function to check if user is admin
 const isAdmin = async (req) => {
@@ -182,14 +206,18 @@ const validateLogin = (req, res, next) => {
   if (!emailRegex.test(email)) {
     return res.status(400).json({
       success: false,
+      errorCode: 'INVALID_EMAIL',
       message: 'Invalid email address',
     });
   }
 
-  if (password.length < 6) {
+  // Note: Password validation not needed for login (we check against hash)
+  // But we can validate format if needed
+  if (!password || password.length === 0) {
     return res.status(400).json({
       success: false,
-      message: 'Password must be at least 6 characters',
+      errorCode: 'MISSING_PASSWORD',
+      message: 'Password is required',
     });
   }
 
@@ -202,6 +230,7 @@ const validateSignup = (req, res, next) => {
   if (!name || !email || !password || !confirmPassword) {
     return res.status(400).json({
       success: false,
+      errorCode: 'MISSING_FIELDS',
       message: 'All fields are required',
     });
   }
@@ -209,6 +238,7 @@ const validateSignup = (req, res, next) => {
   if (name.length < 2) {
     return res.status(400).json({
       success: false,
+      errorCode: 'INVALID_NAME',
       message: 'Name must be at least 2 characters',
     });
   }
@@ -217,20 +247,26 @@ const validateSignup = (req, res, next) => {
   if (!emailRegex.test(email)) {
     return res.status(400).json({
       success: false,
+      errorCode: 'INVALID_EMAIL',
       message: 'Invalid email address',
     });
   }
 
-  if (password.length < 6) {
+  // Enhanced password validation
+  const passwordValidation = validatePassword(password);
+  if (!passwordValidation.valid) {
     return res.status(400).json({
       success: false,
-      message: 'Password must be at least 6 characters',
+      errorCode: 'WEAK_PASSWORD',
+      message: 'Password does not meet requirements',
+      errors: passwordValidation.errors,
     });
   }
 
   if (password !== confirmPassword) {
     return res.status(400).json({
       success: false,
+      errorCode: 'PASSWORDS_DONT_MATCH',
       message: 'Passwords do not match',
     });
   }
@@ -480,12 +516,24 @@ app.post('/api/auth/login', authRateLimiter, validateLogin, validateEmail, async
   try {
     const { email, password } = req.body;
 
+    // Check if account is locked
+    const lockout = await checkAccountLockout(email);
+    if (lockout.locked) {
+      return res.status(423).json({
+        success: false,
+        message: `Account locked due to too many failed login attempts. Please try again after ${lockout.unlockAt ? new Date(lockout.unlockAt).toLocaleString() : '15 minutes'}.`,
+        unlockAt: lockout.unlockAt,
+      });
+    }
+
     // Find user
     const user = await prisma.user.findUnique({
       where: { email },
     });
     
     if (!user) {
+      // Record failed attempt even if user doesn't exist (prevent user enumeration)
+      await recordFailedLogin(email);
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password',
@@ -495,11 +543,25 @@ app.post('/api/auth/login', authRateLimiter, validateLogin, validateEmail, async
     // Verify password
     const isValidPassword = await bcrypt.compare(password, user.passwordHash);
     if (!isValidPassword) {
+      // Record failed login attempt
+      const lockoutStatus = await recordFailedLogin(email);
+      
+      if (lockoutStatus.locked) {
+        return res.status(423).json({
+          success: false,
+          message: `Account locked due to too many failed login attempts. Please try again after ${lockoutStatus.duration ? Math.ceil(lockoutStatus.duration / 60) : 15} minutes.`,
+        });
+      }
+      
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password',
+        remainingAttempts: 5 - lockoutStatus.attempts,
       });
     }
+
+    // Successful login - reset failed attempts
+    await resetFailedLoginAttempts(email);
 
     // Generate tokens
     const accessToken = generateAccessToken(user);
@@ -800,10 +862,51 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
  *                     cached:
  *                       type: boolean
  */
-// GET /api/menus - Get all menu items (with optional filters) - OPTIMIZED WITH CACHING
+/**
+ * GET /api/menus - Get all menu items (with optional filters and pagination)
+ * 
+ * @swagger
+ * /api/menus:
+ *   get:
+ *     summary: Get all menu items with optional filters and pagination
+ *     tags: [Menu]
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number (optional, defaults to all results if not provided)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *         description: Items per page (optional, max 100)
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *         description: Filter by category
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search term
+ *       - in: query
+ *         name: availableOnly
+ *         schema:
+ *           type: boolean
+ *         description: Show only available items
+ *     responses:
+ *       200:
+ *         description: List of menu items (paginated if page/limit provided)
+ */
+// GET /api/menus - Get all menu items (with optional filters and pagination) - OPTIMIZED WITH CACHING
 app.get('/api/menus', async (req, res) => {
   try {
-    const { category, search, minPrice, maxPrice, availableOnly } = req.query;
+    const { category, search, minPrice, maxPrice, availableOnly, page, limit } = req.query;
     
     const filters = {
       category,
@@ -813,13 +916,18 @@ app.get('/api/menus', async (req, res) => {
       availableOnly: availableOnly === 'true',
     };
 
+    // Check if pagination is requested
+    const usePagination = page || limit;
+    const pageNum = page ? parseInt(page) : 1;
+    const limitNum = limit ? Math.min(parseInt(limit), 100) : 20; // Max 100 per page
+
     // Use optimized query with caching
-    const menus = await getMenuItemsOptimized(filters);
+    const allMenus = await getMenuItemsOptimized(filters);
 
     // Apply price filtering if needed (after cache retrieval)
-    let filteredMenus = menus;
+    let filteredMenus = allMenus;
     if (filters.minPrice || filters.maxPrice) {
-      filteredMenus = menus.filter(item => {
+      filteredMenus = allMenus.filter(item => {
         const price = Number(item.price);
         if (filters.minPrice && price < filters.minPrice) return false;
         if (filters.maxPrice && price > filters.maxPrice) return false;
@@ -827,12 +935,37 @@ app.get('/api/menus', async (req, res) => {
       });
     }
 
-    res.json({
+    // Apply pagination if requested
+    let resultData = filteredMenus;
+    let pagination = null;
+    
+    if (usePagination) {
+      const total = filteredMenus.length;
+      const skip = (pageNum - 1) * limitNum;
+      resultData = filteredMenus.slice(skip, skip + limitNum);
+      
+      pagination = {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum * limitNum < total,
+        hasPrev: pageNum > 1,
+      };
+    }
+
+    const response = {
       success: true,
-      data: filteredMenus,
-      count: filteredMenus.length,
+      data: resultData,
+      count: resultData.length,
       cached: Object.keys(filters).length === 0,
-    });
+    };
+    
+    if (pagination) {
+      response.pagination = pagination;
+    }
+
+    res.json(response);
   } catch (error) {
     console.error('Get menus error:', error);
     if (Sentry) {
@@ -1146,7 +1279,26 @@ app.delete('/api/menus/:id', authenticateToken, async (req, res) => {
 
 // Truck routes
 // Helper function to calculate distance between two coordinates (Haversine formula)
+// Includes validation to prevent NaN or Infinity results
 function calculateDistance(lat1, lon1, lat2, lon2) {
+  // Validate inputs
+  if (
+    typeof lat1 !== 'number' || typeof lon1 !== 'number' ||
+    typeof lat2 !== 'number' || typeof lon2 !== 'number' ||
+    isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2) ||
+    !isFinite(lat1) || !isFinite(lon1) || !isFinite(lat2) || !isFinite(lon2)
+  ) {
+    throw new Error('Invalid coordinates: all values must be valid numbers');
+  }
+  
+  // Validate coordinate ranges
+  if (lat1 < -90 || lat1 > 90 || lat2 < -90 || lat2 > 90) {
+    throw new Error('Invalid latitude: must be between -90 and 90');
+  }
+  if (lon1 < -180 || lon1 > 180 || lon2 < -180 || lon2 > 180) {
+    throw new Error('Invalid longitude: must be between -180 and 180');
+  }
+  
   const R = 6371; // Radius of the Earth in kilometers
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
@@ -1157,7 +1309,14 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
       Math.sin(dLon / 2) *
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c; // Distance in kilometers
+  const distance = R * c; // Distance in kilometers
+  
+  // Validate result
+  if (isNaN(distance) || !isFinite(distance)) {
+    throw new Error('Distance calculation resulted in invalid value');
+  }
+  
+  return distance;
 }
 
 // GET /api/trucks/nearby - Get nearby trucks
@@ -1219,9 +1378,40 @@ app.get('/api/trucks/nearby', async (req, res) => {
   }
 });
 
-// GET /api/trucks - Get all trucks (OPTIMIZED WITH CACHING)
+/**
+ * GET /api/trucks - Get all trucks (with optional pagination)
+ * 
+ * @swagger
+ * /api/trucks:
+ *   get:
+ *     summary: Get all trucks with optional pagination
+ *     tags: [Trucks]
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number (optional, defaults to all results)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *         description: Items per page (optional, max 100)
+ *     responses:
+ *       200:
+ *         description: List of trucks (paginated if page/limit provided)
+ */
+// GET /api/trucks - Get all trucks (OPTIMIZED WITH CACHING, with optional pagination)
 app.get('/api/trucks', async (req, res) => {
   try {
+    const { page, limit } = req.query;
+    const usePagination = page || limit;
+    const pageNum = page ? parseInt(page) : 1;
+    const limitNum = limit ? Math.min(parseInt(limit), 100) : 20;
+
     const allTrucks = await getTrucksOptimized(false);
 
     // Transform to include location object for compatibility
@@ -1233,11 +1423,36 @@ app.get('/api/trucks', async (req, res) => {
       },
     }));
 
-    res.json({
+    // Apply pagination if requested
+    let resultData = trucksWithLocation;
+    let pagination = null;
+    
+    if (usePagination) {
+      const total = trucksWithLocation.length;
+      const skip = (pageNum - 1) * limitNum;
+      resultData = trucksWithLocation.slice(skip, skip + limitNum);
+      
+      pagination = {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum * limitNum < total,
+        hasPrev: pageNum > 1,
+      };
+    }
+
+    const response = {
       success: true,
-      data: trucksWithLocation,
-      count: trucksWithLocation.length,
-    });
+      data: resultData,
+      count: resultData.length,
+    };
+    
+    if (pagination) {
+      response.pagination = pagination;
+    }
+
+    res.json(response);
   } catch (error) {
     console.error('Get trucks error:', error);
     if (Sentry) {
@@ -1441,12 +1656,52 @@ app.put('/api/trucks/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Socket.io connection handling
+// Socket.io connection handling with rate limiting
+const connectionCounts = new Map(); // Track connections per IP
+
+io.use(async (socket, next) => {
+  try {
+    const ip = socket.handshake.address || 
+               socket.request.headers['x-forwarded-for']?.split(',')[0] ||
+               socket.request.connection.remoteAddress;
+    
+    // Check rate limit for WebSocket connections
+    const rateLimitKey = `ws:connection:${ip}`;
+    const rateLimit = await checkRateLimit(rateLimitKey, 10, 60); // 10 connections per minute per IP
+    
+    if (!rateLimit.allowed) {
+      logSecurityEvent('WEBSOCKET_RATE_LIMIT_EXCEEDED', { ip, socketId: socket.id });
+      return next(new Error('Too many connection attempts. Please try again later.'));
+    }
+    
+    // Track connection count per IP
+    const currentCount = connectionCounts.get(ip) || 0;
+    if (currentCount >= 20) { // Max 20 concurrent connections per IP
+      logSecurityEvent('WEBSOCKET_CONNECTION_LIMIT_EXCEEDED', { ip, count: currentCount });
+      return next(new Error('Maximum concurrent connections exceeded'));
+    }
+    
+    connectionCounts.set(ip, currentCount + 1);
+    socket.userIP = ip; // Store IP for cleanup
+    
+    next();
+  } catch (error) {
+    console.error('WebSocket connection error:', error);
+    next(error);
+  }
+});
+
 io.on('connection', async (socket) => {
-  console.log('Client connected:', socket.id);
+  console.log('Client connected:', socket.id, 'from IP:', socket.userIP);
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
+    
+    // Clean up connection count
+    if (socket.userIP) {
+      const currentCount = connectionCounts.get(socket.userIP) || 0;
+      connectionCounts.set(socket.userIP, Math.max(0, currentCount - 1));
+    }
   });
 
   // Send current data to newly connected client (optimized with caching)
@@ -1546,14 +1801,18 @@ app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, async (req,
       });
     }
 
-    // Calculate metrics using Prisma
-    const totalOrders = await prisma.order.count();
-    const completedOrders = await prisma.order.findMany({
-      where: { status: 'completed' },
-      select: { total: true },
-    });
-    const totalRevenue = completedOrders.reduce((sum, order) => sum + Number(order.total), 0);
-    const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+    // Calculate metrics using Prisma aggregations (more efficient)
+    const [totalOrders, revenueData] = await Promise.all([
+      prisma.order.count(),
+      prisma.order.aggregate({
+        where: { status: 'completed' },
+        _sum: { total: true },
+        _avg: { total: true },
+      }),
+    ]);
+    
+    const totalRevenue = Number(revenueData._sum.total || 0);
+    const averageOrderValue = Number(revenueData._avg.total || 0);
     
     // Orders by status
     const statusCounts = await prisma.order.groupBy({
@@ -1600,25 +1859,32 @@ app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, async (req,
       }
     });
 
-    // Top selling items
-    const orderItems = await prisma.orderItem.findMany({
-      include: {
-        menuItem: {
-          select: { name: true },
+    // Top selling items - Use aggregation to avoid N+1 queries
+    const topSellingItemsData = await prisma.orderItem.groupBy({
+      by: ['menuItemId'],
+      _sum: {
+        quantity: true,
+      },
+      orderBy: {
+        _sum: {
+          quantity: 'desc',
         },
       },
+      take: 5,
     });
 
-    const itemCounts = {};
-    orderItems.forEach((item) => {
-      const itemName = item.menuItem.name;
-      itemCounts[itemName] = (itemCounts[itemName] || 0) + item.quantity;
+    // Fetch menu item names in single query
+    const menuItemIds = topSellingItemsData.map(item => item.menuItemId);
+    const menuItems = await prisma.menuItem.findMany({
+      where: { id: { in: menuItemIds } },
+      select: { id: true, name: true },
     });
 
-    const topSellingItems = Object.entries(itemCounts)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
+    // Combine results
+    const topSellingItems = topSellingItemsData.map(item => ({
+      name: menuItems.find(m => m.id === item.menuItemId)?.name || 'Unknown',
+      count: item._sum.quantity || 0,
+    }));
 
     // Payment status breakdown
     const paymentStatusCounts = await prisma.order.groupBy({
@@ -1636,14 +1902,19 @@ app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, async (req,
       paymentStatusBreakdown[paymentStatus] = _count.paymentStatus;
     });
 
-    // Today's metrics
+    // Today's metrics - Use aggregation instead of fetching all orders
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const todayOrders = await prisma.order.findMany({
-      where: { createdAt: { gte: today } },
-      select: { total: true },
-    });
-    const todayRevenue = todayOrders.reduce((sum, o) => sum + Number(o.total), 0);
+    const [todayOrdersCount, todayRevenueData] = await Promise.all([
+      prisma.order.count({
+        where: { createdAt: { gte: today } },
+      }),
+      prisma.order.aggregate({
+        where: { createdAt: { gte: today } },
+        _sum: { total: true },
+      }),
+    ]);
+    const todayRevenue = Number(todayRevenueData._sum.total || 0);
 
     // Menu availability
     const totalMenuItems = await prisma.menuItem.count();
@@ -1897,99 +2168,136 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
       });
     }
 
-    // Validate items and check stock using Prisma transaction
-    const validatedItems = [];
-    let subtotal = 0;
-
-    for (const orderItem of items) {
-      const menuItem = await prisma.menuItem.findUnique({
-        where: { id: orderItem.menuItemId },
-      });
-      
-      if (!menuItem) {
-        return res.status(400).json({
-          success: false,
-          message: `Menu item ${orderItem.menuItemId} not found`,
-        });
-      }
-
-      if (!menuItem.isAvailable) {
-        return res.status(400).json({
-          success: false,
-          message: `${menuItem.name} is not available`,
-        });
-      }
-
-      if (menuItem.stock < orderItem.quantity) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for ${menuItem.name}. Available: ${menuItem.stock}, Requested: ${orderItem.quantity}`,
-        });
-      }
-
-      // Calculate item price with customizations
-      let itemPrice = Number(menuItem.price);
-      if (orderItem.customizations) {
-        const customizationTotal = orderItem.customizations.reduce(
-          (sum, custom) => sum + (custom.priceModifier || 0),
-          0
-        );
-        itemPrice += customizationTotal;
-      }
-
-      validatedItems.push({
-        menuItemId: menuItem.id,
-        quantity: orderItem.quantity,
-        price: itemPrice,
-        customizations: orderItem.customizations || [],
-        specialInstructions: orderItem.specialInstructions,
-      });
-
-      subtotal += itemPrice * orderItem.quantity;
-
-      // Update stock (will be committed in transaction)
-      await prisma.menuItem.update({
-        where: { id: menuItem.id },
-        data: { stock: { decrement: orderItem.quantity } },
+    // Validate input: items must be array, max 50 items
+    if (!Array.isArray(items) || items.length > 50) {
+      return res.status(400).json({
+        success: false,
+        message: 'Items must be an array with 1-50 items',
       });
     }
 
-    const tax = subtotal * TAX_RATE;
-    const total = subtotal + tax;
+    // Use transaction with optimistic locking to prevent race conditions
+    const order = await prisma.$transaction(async (tx) => {
+      const validatedItems = [];
+      let subtotal = 0;
 
-    // Create order with items in a transaction
-    const order = await prisma.order.create({
-      data: {
-        userId: req.user.id,
-        subtotal: parseFloat(subtotal.toFixed(2)),
-        tax: parseFloat(tax.toFixed(2)),
-        total: parseFloat(total.toFixed(2)),
-        status: 'pending',
-        deliveryAddress,
-        pickupLocation,
-        contactPhone,
-        specialInstructions,
-        paymentIntentId,
-        paymentStatus: paymentIntentId ? 'processing' : 'pending',
-        orderItems: {
-          create: validatedItems,
+      // Batch fetch all menu items in single query (performance optimization)
+      const menuItemIds = items.map(item => item.menuItemId);
+      const menuItems = await tx.menuItem.findMany({
+        where: { id: { in: menuItemIds } },
+      });
+
+      // Create lookup map for O(1) access
+      const menuItemMap = new Map(menuItems.map(item => [item.id, item]));
+
+      // Validate and reserve stock atomically
+      for (const orderItem of items) {
+        // Validate order item structure
+        if (!orderItem.menuItemId || typeof orderItem.quantity !== 'number') {
+          throw new Error('Invalid order item: menuItemId and quantity required');
+        }
+        if (orderItem.quantity <= 0 || orderItem.quantity > 100) {
+          throw new Error(`Invalid quantity: must be between 1 and 100, got ${orderItem.quantity}`);
+        }
+
+        // Get menu item from map (O(1) lookup instead of database query)
+        const menuItem = menuItemMap.get(orderItem.menuItemId);
+        
+        if (!menuItem) {
+          throw new Error(`Menu item ${orderItem.menuItemId} not found`);
+        }
+
+        if (!menuItem.isAvailable) {
+          throw new Error(`${menuItem.name} is not available`);
+        }
+
+        if (menuItem.stock < orderItem.quantity) {
+          throw new Error(`Insufficient stock for ${menuItem.name}. Available: ${menuItem.stock}, Requested: ${orderItem.quantity}`);
+        }
+
+        // Calculate item price with customizations
+        let itemPrice = Number(menuItem.price);
+        if (orderItem.customizations && Array.isArray(orderItem.customizations)) {
+          const customizationTotal = orderItem.customizations.reduce(
+            (sum, custom) => {
+              const modifier = typeof custom.priceModifier === 'number' ? custom.priceModifier : 0;
+              return sum + modifier;
+            },
+            0
+          );
+          itemPrice += customizationTotal;
+        }
+
+        validatedItems.push({
+          menuItemId: menuItem.id,
+          quantity: orderItem.quantity,
+          price: itemPrice,
+          customizations: orderItem.customizations || [],
+          specialInstructions: orderItem.specialInstructions || null,
+        });
+
+        subtotal += itemPrice * orderItem.quantity;
+
+        // Optimistic locking: update stock only if version matches and stock is sufficient
+        const updated = await tx.menuItem.updateMany({
+          where: {
+            id: menuItem.id,
+            version: menuItem.version, // Only update if version hasn't changed
+            stock: { gte: orderItem.quantity }, // Double-check stock is sufficient
+          },
+          data: {
+            stock: { decrement: orderItem.quantity },
+            version: { increment: 1 }, // Increment version for optimistic locking
+          },
+        });
+
+        // If no rows updated, stock was changed by another transaction
+        if (updated.count === 0) {
+          throw new Error(`Stock changed for ${menuItem.name}. Please refresh and try again.`);
+        }
+      }
+
+      const tax = subtotal * TAX_RATE;
+      const total = subtotal + tax;
+
+      // Create order with items
+      return await tx.order.create({
+        data: {
+          userId: req.user.id,
+          subtotal: parseFloat(subtotal.toFixed(2)),
+          tax: parseFloat(tax.toFixed(2)),
+          total: parseFloat(total.toFixed(2)),
+          status: 'pending',
+          deliveryAddress,
+          pickupLocation,
+          contactPhone,
+          specialInstructions,
+          paymentIntentId,
+          paymentStatus: paymentIntentId ? 'processing' : 'pending',
+          orderItems: {
+            create: validatedItems,
+          },
         },
-      },
-      include: {
-        orderItems: {
-          include: {
-            menuItem: {
-              select: { id: true, name: true, price: true },
+        include: {
+          orderItems: {
+            include: {
+              menuItem: {
+                select: { id: true, name: true, price: true },
+              },
             },
           },
         },
-      },
+      });
+    }, {
+      isolationLevel: 'ReadCommitted', // Better performance than Serializable, still safe
+      timeout: 10000, // 10 second timeout
     });
 
     // Broadcast order creation via Socket.io
     io.emit('order:created', order);
     
-    // Invalidate analytics cache
+    // Invalidate caches (menu items may have stock changes)
+    await invalidateMenuCache();
     const redisClient = getRedisClient();
     await redisClient.del('analytics:dashboard');
 
@@ -2057,13 +2365,50 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
  *       401:
  *         description: Unauthorized
  */
-// GET /api/orders - Get orders (user's orders or all for admin)
+/**
+ * GET /api/orders - Get orders (user's orders or all for admin, with optional pagination)
+ * 
+ * @swagger
+ * /api/orders:
+ *   get:
+ *     summary: Get orders with optional pagination
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number (optional, defaults to all results)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *         description: Items per page (optional, max 100)
+ *     responses:
+ *       200:
+ *         description: List of orders (paginated if page/limit provided)
+ */
+// GET /api/orders - Get orders (user's orders or all for admin, with optional pagination)
 app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
+    const { page, limit } = req.query;
+    const usePagination = page || limit;
+    const pageNum = page ? parseInt(page) : 1;
+    const limitNum = limit ? Math.min(parseInt(limit), 100) : 20;
+
     const isAdminUser = await isAdmin(req);
     const where = isAdminUser ? {} : { userId: req.user.id };
 
-    const userOrders = await prisma.order.findMany({
+    // Get total count for pagination
+    const total = usePagination ? await prisma.order.count({ where }) : undefined;
+
+    // Build query
+    const queryOptions = {
       where,
       include: {
         orderItems: {
@@ -2075,13 +2420,35 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
         },
       },
       orderBy: { createdAt: 'desc' },
-    });
+    };
 
-    res.json({
+    // Add pagination if requested
+    if (usePagination) {
+      queryOptions.skip = (pageNum - 1) * limitNum;
+      queryOptions.take = limitNum;
+    }
+
+    const userOrders = await prisma.order.findMany(queryOptions);
+
+    const response = {
       success: true,
       data: userOrders,
       count: userOrders.length,
-    });
+    };
+
+    // Add pagination metadata if pagination was used
+    if (usePagination && total !== undefined) {
+      response.pagination = {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum * limitNum < total,
+        hasPrev: pageNum > 1,
+      };
+    }
+
+    res.json(response);
   } catch (error) {
     console.error('Get orders error:', error);
     if (Sentry) {
@@ -2094,10 +2461,47 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
   }
 });
 
-// GET /api/orders/all - Get all orders (admin only)
+/**
+ * GET /api/orders/all - Get all orders (admin only, with optional pagination)
+ * 
+ * @swagger
+ * /api/orders/all:
+ *   get:
+ *     summary: Get all orders with optional pagination (admin only)
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number (optional, defaults to all results)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *         description: Items per page (optional, max 100)
+ *     responses:
+ *       200:
+ *         description: List of all orders (paginated if page/limit provided)
+ */
+// GET /api/orders/all - Get all orders (admin only, with optional pagination)
 app.get('/api/orders/all', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const allOrders = await prisma.order.findMany({
+    const { page, limit } = req.query;
+    const usePagination = page || limit;
+    const pageNum = page ? parseInt(page) : 1;
+    const limitNum = limit ? Math.min(parseInt(limit), 100) : 20;
+
+    // Get total count for pagination
+    const total = usePagination ? await prisma.order.count() : undefined;
+
+    // Build query
+    const queryOptions = {
       include: {
         orderItems: {
           include: {
@@ -2108,13 +2512,35 @@ app.get('/api/orders/all', authenticateToken, requireAdmin, async (req, res) => 
         },
       },
       orderBy: { createdAt: 'desc' },
-    });
+    };
 
-    res.json({
+    // Add pagination if requested
+    if (usePagination) {
+      queryOptions.skip = (pageNum - 1) * limitNum;
+      queryOptions.take = limitNum;
+    }
+
+    const allOrders = await prisma.order.findMany(queryOptions);
+
+    const response = {
       success: true,
       data: allOrders,
       count: allOrders.length,
-    });
+    };
+
+    // Add pagination metadata if pagination was used
+    if (usePagination && total !== undefined) {
+      response.pagination = {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum * limitNum < total,
+        hasPrev: pageNum > 1,
+      };
+    }
+
+    res.json(response);
   } catch (error) {
     console.error('Get all orders error:', error);
     if (Sentry) {

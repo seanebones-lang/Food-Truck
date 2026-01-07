@@ -68,7 +68,14 @@ const securityHeaders = () => {
         styleSrc: ["'self'", "'unsafe-inline'"],
         scriptSrc: ["'self'"],
         imgSrc: ["'self'", "data:", "https:"],
-        connectSrc: ["'self'"],
+        connectSrc: [
+          "'self'",
+          process.env.SOCKET_URL || 'ws://localhost:3001',
+          process.env.API_URL || 'http://localhost:3001',
+          // Allow WebSocket connections
+          'ws://localhost:3001',
+          'wss://*',
+        ],
         fontSrc: ["'self'"],
         objectSrc: ["'none'"],
         mediaSrc: ["'self'"],
@@ -483,6 +490,209 @@ const secureCors = () => {
 };
 
 /**
+ * Check if account is locked due to failed login attempts
+ * 
+ * Implements NIST AC-7 (Unsuccessful Logon Attempts).
+ * Uses exponential backoff: 1min, 5min, 15min, 1hr
+ * 
+ * @param {string} email - User email address
+ * @returns {Promise<Object>} Lockout status { locked: boolean, unlockAt?: Date, attempts?: number }
+ * 
+ * @example
+ * ```javascript
+ * const lockout = await checkAccountLockout('user@example.com');
+ * if (lockout.locked) {
+ *   throw new Error('Account locked');
+ * }
+ * ```
+ */
+async function checkAccountLockout(email) {
+  const { getRedisClient } = require('../utils/redis');
+  const client = getRedisClient();
+  
+  try {
+    const key = `account:lockout:${email}`;
+    const attempts = await client.get(key);
+    
+    if (attempts && parseInt(attempts) >= 5) {
+      // Get lockout metadata
+      const metaKey = `account:lockout:meta:${email}`;
+      const meta = await client.get(metaKey);
+      const metadata = meta ? JSON.parse(meta) : null;
+      
+      return {
+        locked: true,
+        attempts: parseInt(attempts),
+        unlockAt: metadata?.unlockAt ? new Date(metadata.unlockAt) : null,
+      };
+    }
+    
+    return {
+      locked: false,
+      attempts: attempts ? parseInt(attempts) : 0,
+    };
+  } catch (error) {
+    console.error('Error checking account lockout:', error);
+    // Fail open - allow login if lockout check fails
+    return { locked: false, attempts: 0 };
+  }
+}
+
+/**
+ * Record failed login attempt and lock account if threshold reached
+ * 
+ * @param {string} email - User email address
+ * @returns {Promise<Object>} Lockout status { attempts: number, locked: boolean, duration?: number }
+ */
+async function recordFailedLogin(email) {
+  const { getRedisClient } = require('../utils/redis');
+  const client = getRedisClient();
+  
+  try {
+    const key = `account:lockout:${email}`;
+    const attempts = await client.incr(key);
+    
+    // Exponential backoff: 1min, 5min, 15min, 1hr
+    const lockoutDurations = [60, 300, 900, 3600]; // seconds
+    const durationIndex = Math.min(attempts - 1, lockoutDurations.length - 1);
+    const duration = lockoutDurations[durationIndex];
+    
+    if (attempts === 1) {
+      await client.expire(key, duration);
+    }
+    
+    // Store lockout metadata
+    const unlockAt = new Date(Date.now() + duration * 1000);
+    await client.setex(
+      `account:lockout:meta:${email}`,
+      duration,
+      JSON.stringify({
+        attempts,
+        lockedAt: new Date().toISOString(),
+        unlockAt: unlockAt.toISOString(),
+      })
+    );
+    
+    const locked = attempts >= 5;
+    
+    if (locked) {
+      logSecurityEvent('ACCOUNT_LOCKED', { email, attempts, duration });
+    }
+    
+    return { attempts, locked, duration: locked ? duration : null };
+  } catch (error) {
+    console.error('Error recording failed login:', error);
+    return { attempts: 0, locked: false };
+  }
+}
+
+/**
+ * Reset failed login attempts (on successful login or admin action)
+ * 
+ * @param {string} email - User email address
+ * @returns {Promise<void>}
+ */
+async function resetFailedLoginAttempts(email) {
+  const { getRedisClient } = require('../utils/redis');
+  const client = getRedisClient();
+  
+  try {
+    await client.del(`account:lockout:${email}`);
+    await client.del(`account:lockout:meta:${email}`);
+  } catch (error) {
+    console.error('Error resetting failed login attempts:', error);
+  }
+}
+
+/**
+ * Validate password strength
+ * 
+ * Implements NIST SP 800-63B password guidelines:
+ * - Minimum 8 characters (recommended: 12+)
+ * - Maximum 128 characters
+ * - At least one lowercase letter
+ * - At least one uppercase letter
+ * - At least one number
+ * - At least one special character
+ * - Not in common passwords list
+ * 
+ * @param {string} password - Password to validate
+ * @returns {Object} Validation result { valid: boolean, errors: string[] }
+ * 
+ * @example
+ * ```javascript
+ * const result = validatePassword('MyP@ssw0rd');
+ * if (!result.valid) {
+ *   console.error(result.errors);
+ * }
+ * ```
+ */
+function validatePassword(password) {
+  const errors = [];
+  
+  if (!password || typeof password !== 'string') {
+    return { valid: false, errors: ['Password is required'] };
+  }
+  
+  // Length validation
+  if (password.length < 8) {
+    errors.push('Password must be at least 8 characters long');
+  }
+  if (password.length > 128) {
+    errors.push('Password must be less than 128 characters');
+  }
+  
+  // Character requirements
+  if (!/[a-z]/.test(password)) {
+    errors.push('Password must contain at least one lowercase letter');
+  }
+  if (!/[A-Z]/.test(password)) {
+    errors.push('Password must contain at least one uppercase letter');
+  }
+  if (!/[0-9]/.test(password)) {
+    errors.push('Password must contain at least one number');
+  }
+  if (!/[^a-zA-Z0-9]/.test(password)) {
+    errors.push('Password must contain at least one special character (!@#$%^&*()_+-=[]{}|;:,.<>?)');
+  }
+  
+  // Check against common passwords (simplified list)
+  const commonPasswords = [
+    'password', '12345678', '123456789', '1234567890',
+    'qwerty', 'abc123', 'password123', 'admin123',
+    'letmein', 'welcome', 'monkey', '1234567',
+    'sunshine', 'princess', 'dragon', 'passw0rd',
+  ];
+  if (commonPasswords.includes(password.toLowerCase())) {
+    errors.push('Password is too common. Please choose a more unique password');
+  }
+  
+  // Check for repeated characters (e.g., "aaaaaa")
+  if (/(.)\1{3,}/.test(password)) {
+    errors.push('Password contains too many repeated characters');
+  }
+  
+  // Check for sequential characters (e.g., "1234", "abcd")
+  const sequences = ['0123456789', 'abcdefghijklmnopqrstuvwxyz', 'qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
+  const lowerPassword = password.toLowerCase();
+  for (const seq of sequences) {
+    for (let i = 0; i <= seq.length - 4; i++) {
+      const subseq = seq.substring(i, i + 4);
+      if (lowerPassword.includes(subseq) || lowerPassword.includes(subseq.split('').reverse().join(''))) {
+        errors.push('Password contains common sequences');
+        break;
+      }
+    }
+    if (errors.some(e => e.includes('sequences'))) break;
+  }
+  
+  return {
+    valid: errors.length === 0,
+    errors: errors.length > 0 ? errors : undefined,
+  };
+}
+
+/**
  * Security event logger
  * 
  * Implements NIST CA-7 (Continuous Monitoring).
@@ -531,4 +741,8 @@ module.exports = {
   requestSizeLimiter,
   secureCors,
   logSecurityEvent,
+  checkAccountLockout,
+  recordFailedLogin,
+  resetFailedLoginAttempts,
+  validatePassword,
 };

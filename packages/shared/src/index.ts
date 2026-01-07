@@ -5,6 +5,7 @@ export * from './menu';
 export * from './truck';
 export * from './order';
 export * from './offline';
+export * from './errors';
 
 export interface User {
   id: string;

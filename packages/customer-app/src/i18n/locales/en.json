@@ -109,5 +109,32 @@
     "truckMarker": "Food truck {{name}}, {{distance}} away",
     "button": "{{label}} button",
     "link": "{{label}} link"
+  },
+  "errors": {
+    "invalidEmail": "Invalid email address",
+    "invalidCredentials": "Invalid email or password",
+    "missingFields": "All fields are required",
+    "weakPassword": "Password does not meet requirements",
+    "passwordsDontMatch": "Passwords do not match",
+    "missingPassword": "Password is required",
+    "accountLocked": "Account locked due to too many failed login attempts. Please try again later.",
+    "insufficientStock": "Insufficient stock for {{item}}. Available: {{available}}, Requested: {{requested}}",
+    "menuItemNotFound": "Menu item not found",
+    "menuItemUnavailable": "{{item}} is not available",
+    "invalidOrderItem": "Invalid order item",
+    "invalidQuantity": "Invalid quantity: must be between 1 and 100",
+    "orderNotFound": "Order not found",
+    "stockChanged": "Stock changed for {{item}}. Please refresh and try again.",
+    "invalidName": "Name must be at least 2 characters",
+    "invalidCoordinates": "Invalid coordinates",
+    "invalidUrl": "Invalid URL",
+    "unauthorized": "Unauthorized access",
+    "forbidden": "Access forbidden",
+    "adminRequired": "Admin access required",
+    "rateLimitExceeded": "Too many requests. Please try again later.",
+    "websocketRateLimitExceeded": "Too many connection attempts. Please try again later.",
+    "internalServerError": "An internal server error occurred",
+    "databaseError": "Database error occurred",
+    "redisError": "Cache error occurred"
   }
 }

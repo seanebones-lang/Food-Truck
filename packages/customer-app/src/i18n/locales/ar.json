@@ -109,5 +109,32 @@
     "truckMarker": "شاحنة طعام {{name}}, على بعد {{distance}}",
     "button": "زر {{label}}",
     "link": "رابط {{label}}"
+  },
+  "errors": {
+    "invalidEmail": "عنوان بريد إلكتروني غير صالح",
+    "invalidCredentials": "البريد الإلكتروني أو كلمة المرور غير صحيحة",
+    "missingFields": "جميع الحقول مطلوبة",
+    "weakPassword": "كلمة المرور لا تستوفي المتطلبات",
+    "passwordsDontMatch": "كلمات المرور غير متطابقة",
+    "missingPassword": "كلمة المرور مطلوبة",
+    "accountLocked": "تم قفل الحساب بسبب محاولات تسجيل دخول فاشلة كثيرة. يرجى المحاولة لاحقاً.",
+    "insufficientStock": "مخزون غير كافٍ لـ {{item}}. المتاح: {{available}}, المطلوب: {{requested}}",
+    "menuItemNotFound": "عنصر القائمة غير موجود",
+    "menuItemUnavailable": "{{item}} غير متاح",
+    "invalidOrderItem": "عنصر طلب غير صالح",
+    "invalidQuantity": "كمية غير صالحة: يجب أن تكون بين 1 و 100",
+    "orderNotFound": "الطلب غير موجود",
+    "stockChanged": "تغير المخزون لـ {{item}}. يرجى التحديث والمحاولة مرة أخرى.",
+    "invalidName": "يجب أن يكون الاسم حرفين على الأقل",
+    "invalidCoordinates": "إحداثيات غير صالحة",
+    "invalidUrl": "رابط غير صالح",
+    "unauthorized": "وصول غير مصرح به",
+    "forbidden": "الوصول محظور",
+    "adminRequired": "يتطلب وصول المدير",
+    "rateLimitExceeded": "طلبات كثيرة جداً. يرجى المحاولة لاحقاً.",
+    "websocketRateLimitExceeded": "محاولات اتصال كثيرة جداً. يرجى المحاولة لاحقاً.",
+    "internalServerError": "حدث خطأ داخلي في الخادم",
+    "databaseError": "حدث خطأ في قاعدة البيانات",
+    "redisError": "حدث خطأ في التخزين المؤقت"
   }
 }

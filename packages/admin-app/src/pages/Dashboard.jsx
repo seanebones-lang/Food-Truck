@@ -9,6 +9,7 @@ import {
   Tag,
   Table,
   message,
+  Spin,
 } from 'antd';
 import {
   DollarOutlined,
@@ -82,7 +83,11 @@ export function Dashboard() {
   };
 
   if (loading && !analytics) {
-    return <div style={{ padding: '24px', textAlign: 'center' }}>Loading...</div>;
+    return (
+      <div style={{ padding: '24px', textAlign: 'center' }}>
+        <Spin size="large" tip="Loading analytics dashboard..." />
+      </div>
+    );
   }
 
   if (!analytics) {

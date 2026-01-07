@@ -336,6 +336,56 @@ function compressionMetrics(req, res, next) {
   next();
 }
 
+/**
+ * Response caching headers middleware
+ * Sets appropriate Cache-Control headers based on endpoint type
+ * 
+ * @param {express.Request} req - Express request object
+ * @param {express.Response} res - Express response object
+ * @param {express.NextFunction} next - Express next function
+ * 
+ * @returns {void}
+ * 
+ * Cache strategies:
+ * - Static data (menus, trucks): 5 minutes public cache
+ * - User-specific data (auth, orders): No cache
+ * - Analytics: 1 minute private cache
+ * - Default: No cache
+ */
+function responseCacheHeaders(req, res, next) {
+  const endpoint = req.path;
+  
+  // Static data (menus, trucks) - cache for 5 minutes
+  if (endpoint.includes('/api/menus') || endpoint.includes('/api/trucks')) {
+    res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=60');
+    res.setHeader('Vary', 'Accept-Encoding');
+  }
+  
+  // User-specific data - no cache
+  else if (endpoint.includes('/api/auth') || endpoint.includes('/api/orders')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  
+  // Analytics - short cache (1 minute)
+  else if (endpoint.includes('/api/analytics')) {
+    res.setHeader('Cache-Control', 'private, max-age=60, must-revalidate');
+  }
+  
+  // Health checks - short cache
+  else if (endpoint === '/health' || endpoint === '/api/health') {
+    res.setHeader('Cache-Control', 'public, max-age=30');
+  }
+  
+  // Default - no cache
+  else {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  }
+  
+  next();
+}
+
 module.exports = {
   cacheMenuItems,
   getCachedMenuItems,
@@ -352,5 +402,6 @@ module.exports = {
   queryOptimizer,
   paginate,
   compressionMetrics,
+  responseCacheHeaders,
   CACHE_TTL,
 };

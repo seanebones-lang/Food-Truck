@@ -1,37 +1,67 @@
 /**
  * Reliability Middleware Module
- * Implements fault tolerance, circuit breakers, and health checks
- * Target: 99.999% uptime
+ * 
+ * Implements fault tolerance, circuit breakers, health checks, and graceful degradation.
+ * Target: 99.999% uptime, fault-tolerant with redundancy.
+ * 
+ * @module middleware/reliability
+ * @author Food Truck Engineering Team
+ * @version 2.0.0
+ * @since 1.0.0
+ * 
+ * @example
+ * ```javascript
+ * const { healthCheck, circuitBreakers, retryWithBackoff } = require('./middleware/reliability');
+ * const health = await healthCheck();
+ * ```
+ * 
+ * Features:
+ * - Circuit breakers for fault isolation
+ * - Automatic retry with exponential backoff
+ * - Health check endpoints
+ * - Graceful shutdown handling
+ * - Request timeout management
  */
 
 const { getRedisClient } = require('../utils/redis');
 const prisma = require('../utils/prisma').default;
 
 /**
- * Circuit Breaker implementation
- * Prevents cascading failures
+ * Circuit Breaker Implementation
+ * 
+ * Implements the circuit breaker pattern for fault tolerance.
+ * States: CLOSED -> OPEN -> HALF_OPEN -> CLOSED
+ * 
+ * @class CircuitBreaker
  */
 class CircuitBreaker {
   constructor(name, options = {}) {
     this.name = name;
-    this.failureThreshold = options.failureThreshold || 5;
-    this.resetTimeout = options.resetTimeout || 60000; // 1 minute
-    this.monitoringWindow = options.monitoringWindow || 60000; // 1 minute
-    this.failures = 0;
-    this.lastFailureTime = null;
     this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
-    this.successCount = 0;
-    this.halfOpenSuccessThreshold = options.halfOpenSuccessThreshold || 2;
+    this.failures = 0;
+    this.successes = 0;
+    this.failureThreshold = options.failureThreshold || 5;
+    this.resetTimeout = options.resetTimeout || 60000; // 60 seconds
+    this.successThreshold = options.successThreshold || 2;
+    this.lastFailureTime = null;
   }
 
+  /**
+   * Execute function with circuit breaker protection
+   * 
+   * @param {Function} fn - Function to execute
+   * @param {Function} fallback - Fallback function if circuit is open
+   * @returns {Promise<any>} Result of function or fallback
+   */
   async execute(fn, fallback = null) {
+    // Check if circuit should transition from OPEN to HALF_OPEN
     if (this.state === 'OPEN') {
-      // Check if we should attempt to close
-      if (Date.now() - this.lastFailureTime > this.resetTimeout) {
+      const timeSinceLastFailure = Date.now() - this.lastFailureTime;
+      if (timeSinceLastFailure >= this.resetTimeout) {
         this.state = 'HALF_OPEN';
-        this.successCount = 0;
+        this.successes = 0;
       } else {
-        // Circuit is open, use fallback
+        // Circuit is still open, use fallback
         if (fallback) {
           return fallback();
         }
@@ -42,23 +72,31 @@ class CircuitBreaker {
     try {
       const result = await fn();
       
-      // Success - reset failure count
+      // Success - reset failures
       if (this.state === 'HALF_OPEN') {
-        this.successCount++;
-        if (this.successCount >= this.halfOpenSuccessThreshold) {
+        this.successes++;
+        if (this.successes >= this.successThreshold) {
           this.state = 'CLOSED';
           this.failures = 0;
+          this.successes = 0;
         }
       } else {
+        // CLOSED state - reset failures on success
         this.failures = 0;
       }
       
       return result;
     } catch (error) {
+      // Failure - increment failure count
       this.failures++;
       this.lastFailureTime = Date.now();
       
-      if (this.failures >= this.failureThreshold) {
+      if (this.state === 'HALF_OPEN') {
+        // Failed in half-open, go back to open
+        this.state = 'OPEN';
+        this.successes = 0;
+      } else if (this.failures >= this.failureThreshold) {
+        // Too many failures, open circuit
         this.state = 'OPEN';
       }
       
@@ -71,56 +109,87 @@ class CircuitBreaker {
     }
   }
 
+  /**
+   * Reset circuit breaker
+   */
+  reset() {
+    this.state = 'CLOSED';
+    this.failures = 0;
+    this.successes = 0;
+    this.lastFailureTime = null;
+  }
+
+  /**
+   * Get current state
+   */
   getState() {
     return {
-      name: this.name,
       state: this.state,
       failures: this.failures,
+      successes: this.successes,
       lastFailureTime: this.lastFailureTime,
     };
   }
 }
 
-// Circuit breakers for different services
+/**
+ * Circuit breaker instances for different services
+ */
 const circuitBreakers = {
   database: new CircuitBreaker('database', {
     failureThreshold: 5,
-    resetTimeout: 30000,
+    resetTimeout: 30000, // 30 seconds
   }),
   redis: new CircuitBreaker('redis', {
-    failureThreshold: 3,
+    failureThreshold: 5,
     resetTimeout: 30000,
   }),
-  externalApi: new CircuitBreaker('externalApi', {
-    failureThreshold: 5,
+  external: new CircuitBreaker('external', {
+    failureThreshold: 3,
     resetTimeout: 60000,
   }),
 };
 
 /**
- * Retry logic with exponential backoff
+ * Retry with exponential backoff
+ * 
+ * @param {Function} fn - Function to retry
+ * @param {Object} options - Retry options
+ * @param {number} options.maxRetries - Maximum number of retries (default: 3)
+ * @param {number} options.initialDelay - Initial delay in ms (default: 1000)
+ * @param {number} options.multiplier - Backoff multiplier (default: 2)
+ * @param {number} options.maxDelay - Maximum delay in ms (default: 30000)
+ * @returns {Promise<any>} Result of function
  */
 async function retryWithBackoff(fn, options = {}) {
-  const maxRetries = options.maxRetries || 3;
-  const initialDelay = options.initialDelay || 1000;
-  const maxDelay = options.maxDelay || 10000;
-  const multiplier = options.multiplier || 2;
+  const {
+    maxRetries = 3,
+    initialDelay = 1000,
+    multiplier = 2,
+    maxDelay = 30000,
+  } = options;
 
   let lastError;
   
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (error) {
       lastError = error;
       
-      if (attempt < maxRetries - 1) {
-        const delay = Math.min(
-          initialDelay * Math.pow(multiplier, attempt),
-          maxDelay
-        );
-        await new Promise(resolve => setTimeout(resolve, delay));
+      // Don't retry on last attempt
+      if (attempt === maxRetries) {
+        break;
       }
+      
+      // Calculate delay with exponential backoff
+      const delay = Math.min(
+        initialDelay * Math.pow(multiplier, attempt),
+        maxDelay
+      );
+      
+      // Wait before retrying
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
   
@@ -128,113 +197,75 @@ async function retryWithBackoff(fn, options = {}) {
 }
 
 /**
- * Health check middleware
- * Implements comprehensive health monitoring
+ * Health check function
+ * 
+ * Checks the health of all critical services:
+ * - Database connectivity
+ * - Redis connectivity
+ * 
+ * @returns {Promise<Object>} Health status object
  */
 async function healthCheck() {
-  const health = {
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    checks: {},
+  const checks = {
+    database: { status: 'unknown', responseTime: null, error: null },
+    redis: { status: 'unknown', responseTime: null, error: null },
+  };
+  
+  const startTime = Date.now();
+  
+  // Check database
+  try {
+    const dbStart = Date.now();
+    await prisma.$queryRaw`SELECT 1`;
+    checks.database.responseTime = Date.now() - dbStart;
+    checks.database.status = 'healthy';
+  } catch (error) {
+    checks.database.status = 'unhealthy';
+    checks.database.error = error.message;
+  }
+  
+  // Check Redis
+  try {
+    const redisStart = Date.now();
+    const client = getRedisClient();
+    await client.ping();
+    checks.redis.responseTime = Date.now() - redisStart;
+    checks.redis.status = 'healthy';
+  } catch (error) {
+    checks.redis.status = 'unhealthy';
+    checks.redis.error = error.message;
+  }
+  
+  // Determine overall status
+  const allHealthy = Object.values(checks).every(
+    (check) => check.status === 'healthy'
+  );
+  const anyUnhealthy = Object.values(checks).some(
+    (check) => check.status === 'unhealthy'
+  );
+  
+  const status = allHealthy ? 'healthy' : anyUnhealthy ? 'degraded' : 'unknown';
+  
+  return {
+    status,
+    checks,
     uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    responseTime: Date.now() - startTime,
   };
-
-  // Database health check
-  try {
-    await circuitBreakers.database.execute(async () => {
-      await prisma.$queryRaw`SELECT 1`;
-    });
-    health.checks.database = { status: 'healthy' };
-  } catch (error) {
-    health.checks.database = { status: 'unhealthy', error: error.message };
-    health.status = 'degraded';
-  }
-
-  // Redis health check
-  try {
-    await circuitBreakers.redis.execute(async () => {
-      const client = getRedisClient();
-      await client.ping();
-    });
-    health.checks.redis = { status: 'healthy' };
-  } catch (error) {
-    health.checks.redis = { status: 'unhealthy', error: error.message };
-    health.status = 'degraded';
-  }
-
-  // Memory check
-  const memUsage = process.memoryUsage();
-  const memThreshold = 1024 * 1024 * 1024; // 1GB
-  if (memUsage.heapUsed > memThreshold) {
-    health.checks.memory = {
-      status: 'warning',
-      heapUsed: `${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`,
-    };
-  } else {
-    health.checks.memory = { status: 'healthy' };
-  }
-
-  // CPU check (simplified)
-  health.checks.cpu = { status: 'healthy' };
-
-  return health;
-}
-
-/**
- * Graceful shutdown handler
- */
-function setupGracefulShutdown(server) {
-  const shutdown = async (signal) => {
-    console.log(`\n${signal} received. Starting graceful shutdown...`);
-    
-    // Stop accepting new connections
-    server.close(() => {
-      console.log('HTTP server closed');
-    });
-
-    // Close database connections
-    try {
-      await prisma.$disconnect();
-      console.log('Database connections closed');
-    } catch (error) {
-      console.error('Error closing database:', error);
-    }
-
-    // Close Redis connections
-    try {
-      const redisClient = getRedisClient();
-      await redisClient.quit();
-      console.log('Redis connections closed');
-    } catch (error) {
-      console.error('Error closing Redis:', error);
-    }
-
-    // Exit process
-    process.exit(0);
-  };
-
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
-
-  // Handle uncaught exceptions
-  process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
-    shutdown('uncaughtException');
-  });
-
-  // Handle unhandled promise rejections
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    shutdown('unhandledRejection');
-  });
 }
 
 /**
  * Request timeout middleware
+ * 
+ * Sets a timeout for requests to prevent hanging requests.
+ * 
+ * @param {number} timeoutMs - Timeout in milliseconds
+ * @returns {Function} Express middleware
  */
-function requestTimeout(timeout = 30000) {
+function requestTimeout(timeoutMs) {
   return (req, res, next) => {
-    req.setTimeout(timeout, () => {
+    req.setTimeout(timeoutMs, () => {
       if (!res.headersSent) {
         res.status(408).json({
           success: false,
@@ -247,27 +278,56 @@ function requestTimeout(timeout = 30000) {
 }
 
 /**
- * Error handler with circuit breaker integration
+ * Setup graceful shutdown
+ * 
+ * Handles graceful shutdown of the server and connections.
+ * 
+ * @param {http.Server} server - HTTP server instance
  */
-function errorHandler(err, req, res, next) {
-  // Log error
-  console.error('Error:', err);
-
-  // Update circuit breaker if it's a service error
-  if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
-    circuitBreakers.database.failures++;
-  }
-
-  // Send error response
-  const statusCode = err.statusCode || 500;
-  const message = process.env.NODE_ENV === 'production'
-    ? 'Internal server error'
-    : err.message;
-
-  res.status(statusCode).json({
-    success: false,
-    message,
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
+function setupGracefulShutdown(server) {
+  const gracefulShutdown = async (signal) => {
+    console.log(`\n${signal} received. Starting graceful shutdown...`);
+    
+    // Stop accepting new connections
+    server.close(() => {
+      console.log('HTTP server closed');
+    });
+    
+    // Close database connections
+    try {
+      await prisma.$disconnect();
+      console.log('Database connections closed');
+    } catch (error) {
+      console.error('Error closing database connections:', error);
+    }
+    
+    // Close Redis connections
+    try {
+      const { closeRedis } = require('../utils/redis');
+      await closeRedis();
+      console.log('Redis connections closed');
+    } catch (error) {
+      console.error('Error closing Redis connections:', error);
+    }
+    
+    // Exit process
+    process.exit(0);
+  };
+  
+  // Handle shutdown signals
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  
+  // Handle uncaught exceptions
+  process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    gracefulShutdown('uncaughtException');
+  });
+  
+  // Handle unhandled promise rejections
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    gracefulShutdown('unhandledRejection');
   });
 }
 
@@ -276,7 +336,6 @@ module.exports = {
   circuitBreakers,
   retryWithBackoff,
   healthCheck,
-  setupGracefulShutdown,
   requestTimeout,
-  errorHandler,
+  setupGracefulShutdown,
 };

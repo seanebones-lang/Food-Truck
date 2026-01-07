@@ -109,5 +109,32 @@
     "truckMarker": "Camion de nourriture {{name}}, à {{distance}}",
     "button": "Bouton {{label}}",
     "link": "Lien {{label}}"
+  },
+  "errors": {
+    "invalidEmail": "Adresse e-mail invalide",
+    "invalidCredentials": "E-mail ou mot de passe invalide",
+    "missingFields": "Tous les champs sont requis",
+    "weakPassword": "Le mot de passe ne répond pas aux exigences",
+    "passwordsDontMatch": "Les mots de passe ne correspondent pas",
+    "missingPassword": "Le mot de passe est requis",
+    "accountLocked": "Compte verrouillé en raison de trop de tentatives de connexion échouées. Veuillez réessayer plus tard.",
+    "insufficientStock": "Stock insuffisant pour {{item}}. Disponible: {{available}}, Demandé: {{requested}}",
+    "menuItemNotFound": "Article du menu introuvable",
+    "menuItemUnavailable": "{{item}} n'est pas disponible",
+    "invalidOrderItem": "Article de commande invalide",
+    "invalidQuantity": "Quantité invalide: doit être entre 1 et 100",
+    "orderNotFound": "Commande introuvable",
+    "stockChanged": "Le stock a changé pour {{item}}. Veuillez actualiser et réessayer.",
+    "invalidName": "Le nom doit contenir au moins 2 caractères",
+    "invalidCoordinates": "Coordonnées invalides",
+    "invalidUrl": "URL invalide",
+    "unauthorized": "Accès non autorisé",
+    "forbidden": "Accès interdit",
+    "adminRequired": "Accès administrateur requis",
+    "rateLimitExceeded": "Trop de demandes. Veuillez réessayer plus tard.",
+    "websocketRateLimitExceeded": "Trop de tentatives de connexion. Veuillez réessayer plus tard.",
+    "internalServerError": "Une erreur interne du serveur s'est produite",
+    "databaseError": "Une erreur de base de données s'est produite",
+    "redisError": "Une erreur de cache s'est produite"
   }
 }
