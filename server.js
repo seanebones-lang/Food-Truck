@@ -12,8 +12,37 @@ try {
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const compression = require('compression');
 const { getRedisClient, cacheAnalytics, getCachedAnalytics, blocklistToken, isTokenBlocklisted, checkRateLimit } = require('./utils/redis');
 const prisma = require('./utils/prisma').default;
+const {
+  securityHeaders,
+  globalRateLimiter,
+  authRateLimiter,
+  redisRateLimiter,
+  inputSanitization,
+  validateInput,
+  validateEmail,
+  validateUrl,
+  requestSizeLimiter,
+  secureCors,
+  logSecurityEvent,
+} = require('./middleware/security');
+const {
+  healthCheck,
+  setupGracefulShutdown,
+  requestTimeout,
+  circuitBreakers,
+  retryWithBackoff,
+} = require('./middleware/reliability');
+const {
+  getMenuItemsOptimized,
+  getTrucksOptimized,
+  invalidateMenuCache,
+  invalidateTrucksCache,
+  performanceMonitor,
+  compressionMetrics,
+} = require('./middleware/performance');
 require('dotenv').config();
 
 // Initialize Sentry for error tracking (must be before app creation in production)
@@ -92,12 +121,18 @@ if (Sentry) {
   app.use(Sentry.Handlers.tracingHandler());
 }
 
-// Middleware
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
-  credentials: true,
-}));
-app.use(express.json({ limit: '10mb' }));
+// Security middleware (must be early in the chain)
+app.use(securityHeaders()); // Security headers (CSP, HSTS, etc.)
+app.use(secureCors()); // Secure CORS configuration
+app.use(compression()); // Response compression
+app.use(globalRateLimiter); // Global rate limiting
+app.use(redisRateLimiter); // Redis-based distributed rate limiting
+app.use(...inputSanitization()); // Input sanitization (XSS, injection prevention)
+app.use(validateInput); // Custom input validation
+app.use(requestSizeLimiter('10mb')); // Request size limiting
+app.use(requestTimeout(30000)); // Request timeout (30 seconds)
+app.use(performanceMonitor); // Performance monitoring
+app.use(compressionMetrics); // Compression metrics
 
 // Helper function to check if user is admin
 const isAdmin = async (req) => {
@@ -244,8 +279,92 @@ const authenticateToken = async (req, res, next) => {
   });
 };
 
-// Routes
-app.post('/api/auth/signup', validateSignup, async (req, res) => {
+// Health check endpoint (no rate limiting)
+app.get('/health', async (req, res) => {
+  try {
+    const health = await healthCheck();
+    const statusCode = health.status === 'healthy' ? 200 : 503;
+    res.status(statusCode).json(health);
+  } catch (error) {
+    res.status(503).json({
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      error: error.message,
+    });
+  }
+});
+
+app.get('/api/health', async (req, res) => {
+  try {
+    const health = await healthCheck();
+    const statusCode = health.status === 'healthy' ? 200 : 503;
+    res.status(statusCode).json(health);
+  } catch (error) {
+    res.status(503).json({
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/signup:
+ *   post:
+ *     summary: Register a new user
+ *     tags: [Authentication]
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - email
+ *               - password
+ *               - confirmPassword
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 minLength: 2
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               password:
+ *                 type: string
+ *                 minLength: 6
+ *               confirmPassword:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: User created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Success'
+ *                 - type: object
+ *                   properties:
+ *                     user:
+ *                       $ref: '#/components/schemas/User'
+ *                     tokens:
+ *                       type: object
+ *                       properties:
+ *                         accessToken:
+ *                           type: string
+ *                         refreshToken:
+ *                           type: string
+ *       400:
+ *         description: Validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.post('/api/auth/signup', authRateLimiter, validateSignup, validateEmail, async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
@@ -309,7 +428,55 @@ app.post('/api/auth/signup', validateSignup, async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', validateLogin, async (req, res) => {
+/**
+ * @swagger
+ * /api/auth/login:
+ *   post:
+ *     summary: Login user
+ *     tags: [Authentication]
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - password
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               password:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Login successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Success'
+ *                 - type: object
+ *                   properties:
+ *                     user:
+ *                       $ref: '#/components/schemas/User'
+ *                     tokens:
+ *                       type: object
+ *                       properties:
+ *                         accessToken:
+ *                           type: string
+ *                         refreshToken:
+ *                           type: string
+ *       401:
+ *         description: Invalid credentials
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.post('/api/auth/login', authRateLimiter, validateLogin, validateEmail, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -591,51 +758,86 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
 });
 
 // Menu routes
-// GET /api/menus - Get all menu items (with optional filters)
+/**
+ * @swagger
+ * /api/menus:
+ *   get:
+ *     summary: Get all menu items
+ *     tags: [Menu]
+ *     security: []
+ *     parameters:
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *         description: Filter by category
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search term
+ *       - in: query
+ *         name: availableOnly
+ *         schema:
+ *           type: boolean
+ *         description: Show only available items
+ *     responses:
+ *       200:
+ *         description: List of menu items
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Success'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: array
+ *                       items:
+ *                         $ref: '#/components/schemas/MenuItem'
+ *                     count:
+ *                       type: integer
+ *                     cached:
+ *                       type: boolean
+ */
+// GET /api/menus - Get all menu items (with optional filters) - OPTIMIZED WITH CACHING
 app.get('/api/menus', async (req, res) => {
   try {
     const { category, search, minPrice, maxPrice, availableOnly } = req.query;
     
-    const where = {};
+    const filters = {
+      category,
+      search,
+      minPrice: minPrice ? parseFloat(minPrice) : undefined,
+      maxPrice: maxPrice ? parseFloat(maxPrice) : undefined,
+      availableOnly: availableOnly === 'true',
+    };
 
-    // Filter by category
-    if (category && category !== 'All') {
-      where.category = category;
+    // Use optimized query with caching
+    const menus = await getMenuItemsOptimized(filters);
+
+    // Apply price filtering if needed (after cache retrieval)
+    let filteredMenus = menus;
+    if (filters.minPrice || filters.maxPrice) {
+      filteredMenus = menus.filter(item => {
+        const price = Number(item.price);
+        if (filters.minPrice && price < filters.minPrice) return false;
+        if (filters.maxPrice && price > filters.maxPrice) return false;
+        return true;
+      });
     }
-
-    // Filter by search term
-    if (search) {
-      where.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-      ];
-    }
-
-    // Filter by price range
-    if (minPrice || maxPrice) {
-      where.price = {};
-      if (minPrice) where.price.gte = parseFloat(minPrice);
-      if (maxPrice) where.price.lte = parseFloat(maxPrice);
-    }
-
-    // Filter by availability
-    if (availableOnly === 'true') {
-      where.isAvailable = true;
-      where.stock = { gt: 0 };
-    }
-
-    const menus = await prisma.menuItem.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-    });
 
     res.json({
       success: true,
-      data: menus,
-      count: menus.length,
+      data: filteredMenus,
+      count: filteredMenus.length,
+      cached: Object.keys(filters).length === 0,
     });
   } catch (error) {
     console.error('Get menus error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -643,6 +845,40 @@ app.get('/api/menus', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/menus/{id}:
+ *   get:
+ *     summary: Get single menu item
+ *     tags: [Menu]
+ *     security: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Menu item ID
+ *     responses:
+ *       200:
+ *         description: Menu item details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Success'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       $ref: '#/components/schemas/MenuItem'
+ *       404:
+ *         description: Menu item not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // GET /api/menus/:id - Get single menu item
 app.get('/api/menus/:id', async (req, res) => {
   try {
@@ -670,8 +906,65 @@ app.get('/api/menus/:id', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/menus:
+ *   post:
+ *     summary: Create menu item (admin only)
+ *     tags: [Menu]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - description
+ *               - price
+ *               - category
+ *             properties:
+ *               name:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *               price:
+ *                 type: number
+ *                 format: decimal
+ *               category:
+ *                 type: string
+ *               imageUrl:
+ *                 type: string
+ *                 format: uri
+ *               stock:
+ *                 type: integer
+ *               isAvailable:
+ *                 type: boolean
+ *               tags:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Menu item created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Success'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       $ref: '#/components/schemas/MenuItem'
+ *       400:
+ *         description: Validation error
+ *       403:
+ *         description: Admin access required
+ */
 // POST /api/menus - Create menu item (admin only)
-app.post('/api/menus', authenticateToken, async (req, res) => {
+app.post('/api/menus', authenticateToken, validateUrl, async (req, res) => {
   try {
     if (!(await isAdmin(req))) {
       return res.status(403).json({
@@ -713,7 +1006,8 @@ app.post('/api/menus', authenticateToken, async (req, res) => {
     // Broadcast update via Socket.io
     io.emit('menu:created', newMenuItem);
     
-    // Invalidate analytics cache
+    // Invalidate caches
+    await invalidateMenuCache();
     await getRedisClient().del('analytics:dashboard');
 
     res.json({
@@ -731,7 +1025,7 @@ app.post('/api/menus', authenticateToken, async (req, res) => {
 });
 
 // PUT /api/menus/:id - Update menu item (admin only)
-app.put('/api/menus/:id', authenticateToken, async (req, res) => {
+app.put('/api/menus/:id', authenticateToken, validateUrl, async (req, res) => {
   try {
     if (!(await isAdmin(req))) {
       return res.status(403).json({
@@ -777,7 +1071,8 @@ app.put('/api/menus/:id', authenticateToken, async (req, res) => {
       isAvailable: updatedMenuItem.isAvailable,
     });
 
-    // Invalidate analytics cache
+    // Invalidate caches
+    await invalidateMenuCache();
     const redisClient = getRedisClient();
     await redisClient.del('analytics:dashboard');
 
@@ -827,7 +1122,8 @@ app.delete('/api/menus/:id', authenticateToken, async (req, res) => {
     // Broadcast update via Socket.io
     io.emit('menu:deleted', { id: req.params.id });
     
-    // Invalidate analytics cache
+    // Invalidate caches
+    await invalidateMenuCache();
     const redisClient = getRedisClient();
     await redisClient.del('analytics:dashboard');
 
@@ -881,10 +1177,8 @@ app.get('/api/trucks/nearby', async (req, res) => {
     const searchRadius = parseFloat(radius);
     const resultLimit = parseInt(limit);
 
-    // Get all active trucks from database
-    const activeTrucks = await prisma.truck.findMany({
-      where: { isActive: true },
-    });
+    // Get all active trucks from database (optimized with caching)
+    const activeTrucks = await getTrucksOptimized(true);
 
     // Filter and calculate distances
     const nearbyTrucks = activeTrucks
@@ -925,12 +1219,10 @@ app.get('/api/trucks/nearby', async (req, res) => {
   }
 });
 
-// GET /api/trucks - Get all trucks
+// GET /api/trucks - Get all trucks (OPTIMIZED WITH CACHING)
 app.get('/api/trucks', async (req, res) => {
   try {
-    const allTrucks = await prisma.truck.findMany({
-      orderBy: { lastUpdated: 'desc' },
-    });
+    const allTrucks = await getTrucksOptimized(false);
 
     // Transform to include location object for compatibility
     const trucksWithLocation = allTrucks.map((truck) => ({
@@ -1060,6 +1352,9 @@ app.post('/api/trucks/location', authenticateToken, async (req, res) => {
 
     // Broadcast update via Socket.io
     io.emit('truck:location:updated', truckWithLocation);
+    
+    // Invalidate trucks cache
+    await invalidateTrucksCache();
 
     res.json({
       success: true,
@@ -1125,6 +1420,9 @@ app.put('/api/trucks/:id', authenticateToken, async (req, res) => {
 
     // Broadcast update via Socket.io
     io.emit('truck:updated', truckWithLocation);
+    
+    // Invalidate trucks cache
+    await invalidateTrucksCache();
 
     res.json({
       success: true,
@@ -1151,11 +1449,11 @@ io.on('connection', async (socket) => {
     console.log('Client disconnected:', socket.id);
   });
 
-  // Send current data to newly connected client
+  // Send current data to newly connected client (optimized with caching)
   try {
     const [menus, trucks] = await Promise.all([
-      prisma.menuItem.findMany({ orderBy: { createdAt: 'desc' } }),
-      prisma.truck.findMany({ where: { isActive: true } }),
+      getMenuItemsOptimized({}),
+      getTrucksOptimized(true),
     ]);
 
     // Transform trucks to include location object
@@ -1186,6 +1484,53 @@ const requireAdmin = async (req, res, next) => {
 };
 
 // Analytics routes (admin only)
+/**
+ * @swagger
+ * /api/analytics/dashboard:
+ *   get:
+ *     summary: Get dashboard analytics (admin only)
+ *     tags: [Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Start date for analytics
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: End date for analytics
+ *     responses:
+ *       200:
+ *         description: Dashboard analytics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Success'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         overview:
+ *                           type: object
+ *                         ordersByStatus:
+ *                           type: object
+ *                         revenueByDay:
+ *                           type: object
+ *                         topSellingItems:
+ *                           type: array
+ *                     cached:
+ *                       type: boolean
+ *       403:
+ *         description: Admin access required
+ */
 // GET /api/analytics/dashboard - Get dashboard metrics
 app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -1481,6 +1826,65 @@ app.get('/api/analytics/orders', authenticateToken, requireAdmin, async (req, re
 // Order routes
 const TAX_RATE = 0.08; // 8% tax
 
+/**
+ * @swagger
+ * /api/orders:
+ *   post:
+ *     summary: Create new order
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - items
+ *             properties:
+ *               items:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required:
+ *                     - menuItemId
+ *                     - quantity
+ *                   properties:
+ *                     menuItemId:
+ *                       type: string
+ *                       format: uuid
+ *                     quantity:
+ *                       type: integer
+ *                     customizations:
+ *                       type: array
+ *                     specialInstructions:
+ *                       type: string
+ *               deliveryAddress:
+ *                 type: string
+ *               pickupLocation:
+ *                 type: string
+ *               contactPhone:
+ *                 type: string
+ *               paymentIntentId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Order created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Success'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       $ref: '#/components/schemas/Order'
+ *       400:
+ *         description: Validation error or insufficient stock
+ *       401:
+ *         description: Unauthorized
+ */
 // POST /api/orders - Create new order
 app.post('/api/orders', authenticateToken, async (req, res) => {
   try {
@@ -1626,6 +2030,33 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/orders:
+ *   get:
+ *     summary: Get orders (user's orders or all for admin)
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of orders
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/Success'
+ *                 - type: object
+ *                   properties:
+ *                     data:
+ *                       type: array
+ *                       items:
+ *                         $ref: '#/components/schemas/Order'
+ *                     count:
+ *                       type: integer
+ *       401:
+ *         description: Unauthorized
+ */
 // GET /api/orders - Get orders (user's orders or all for admin)
 app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
@@ -2096,8 +2527,7 @@ app.post('/api/notifications/team-coordination', authenticateToken, requireAdmin
   }
 });
 
-// Note: Sample data is now initialized via Prisma seed script
-// Run: yarn db:seed
+// Database seeding: Run 'yarn db:seed' to initialize sample data
 
 // Error handler must be before other error handlers and after all controllers
 if (Sentry) {
@@ -2118,10 +2548,20 @@ app.use((err, req, res, next) => {
   });
 });
 
+// Setup Swagger documentation (development only)
+if (process.env.NODE_ENV !== 'production') {
+  const { setupSwagger } = require('./swagger');
+  setupSwagger(app);
+  console.log('📚 Swagger API documentation available at /api-docs');
+}
+
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Socket.io server initialized`);
   if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
     console.log(`Sentry error tracking enabled`);
   }
+  
+  // Setup graceful shutdown
+  setupGracefulShutdown(server);
 });
