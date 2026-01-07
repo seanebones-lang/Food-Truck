@@ -6,10 +6,10 @@ import {
   StyleSheet,
   ActivityIndicator,
   TouchableOpacity,
-  Image,
   TextInput,
   RefreshControl,
 } from 'react-native';
+import FastImage from 'react-native-fast-image';
 import { SearchBar, Chip } from 'react-native-elements';
 import type { MenuItem, MenuCategory, MenuFilters } from '@food-truck/shared';
 import { MENU_CATEGORIES, formatCurrency } from '@food-truck/shared';
@@ -118,7 +118,11 @@ export const MenuScreen: React.FC<MenuScreenProps> = ({ navigation }) => {
     return (
       <View style={styles.menuItem}>
         {item.imageUrl ? (
-          <Image source={{ uri: item.imageUrl }} style={styles.menuImage} />
+          <FastImage
+            source={{ uri: item.imageUrl, priority: FastImage.priority.normal }}
+            style={styles.menuImage}
+            resizeMode={FastImage.resizeMode.cover}
+          />
         ) : (
           <View style={styles.menuImagePlaceholder}>
             <Text style={styles.placeholderText}>No Image</Text>

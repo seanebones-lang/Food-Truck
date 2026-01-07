@@ -1,7 +1,7 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { mmkvStorage } from '../utils/mmkvStorage';
 import { storage } from '../utils/storage';
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3001';
@@ -177,7 +177,7 @@ class NotificationService {
 
   async getPreferences(): Promise<NotificationPreferences> {
     try {
-      const prefs = await AsyncStorage.getItem(PREFERENCES_KEY);
+      const prefs = mmkvStorage.mmkvStorage.getString(PREFERENCES_KEY);
       if (prefs) {
         return JSON.parse(prefs);
       }
@@ -203,7 +203,7 @@ class NotificationService {
     try {
       const current = await this.getPreferences();
       const updated = { ...current, ...prefs };
-      await AsyncStorage.setItem(PREFERENCES_KEY, JSON.stringify(updated));
+      mmkvStorage.mmkvStorage.set(PREFERENCES_KEY, JSON.stringify(updated));
     } catch (error) {
       console.error('Error updating notification preferences:', error);
     }

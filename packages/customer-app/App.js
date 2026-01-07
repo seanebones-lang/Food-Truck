@@ -22,12 +22,23 @@ import { useNotifications } from './src/hooks/useNotifications';
 import { useConnectivity } from './src/hooks/useConnectivity';
 import { OfflineBanner } from './src/components/OfflineBanner';
 import { ConflictResolutionModal } from './src/components/ConflictResolutionModal';
-import { LoginScreen } from './src/screens/LoginScreen';
-import { SignupScreen } from './src/screens/SignupScreen';
-import { ProfileScreen } from './src/screens/ProfileScreen';
-import { MenuScreen } from './src/screens/MenuScreen';
-import { MapScreen } from './src/screens/MapScreen';
-import { NotificationSettingsScreen } from './src/screens/NotificationSettingsScreen';
+// Lazy load screens for code splitting
+import { lazy, Suspense } from 'react';
+import { ActivityIndicator, View } from 'react-native';
+
+const LoginScreen = lazy(() => import('./src/screens/LoginScreen').then(module => ({ default: module.LoginScreen })));
+const SignupScreen = lazy(() => import('./src/screens/SignupScreen').then(module => ({ default: module.SignupScreen })));
+const ProfileScreen = lazy(() => import('./src/screens/ProfileScreen').then(module => ({ default: module.ProfileScreen })));
+const MenuScreen = lazy(() => import('./src/screens/MenuScreen').then(module => ({ default: module.MenuScreen })));
+const MapScreen = lazy(() => import('./src/screens/MapScreen').then(module => ({ default: module.MapScreen })));
+const NotificationSettingsScreen = lazy(() => import('./src/screens/NotificationSettingsScreen').then(module => ({ default: module.NotificationSettingsScreen })));
+
+// Loading fallback component
+const ScreenLoader = () => (
+  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+    <ActivityIndicator size="large" color="#f4511e" />
+  </View>
+);
 
 const Stack = createNativeStackNavigator();
 
@@ -93,14 +104,24 @@ function AuthStack() {
     >
       <Stack.Screen
         name="Login"
-        component={LoginScreen}
         options={{ title: 'Sign In' }}
-      />
+      >
+        {props => (
+          <Suspense fallback={<ScreenLoader />}>
+            <LoginScreen {...props} />
+          </Suspense>
+        )}
+      </Stack.Screen>
       <Stack.Screen
         name="Signup"
-        component={SignupScreen}
         options={{ title: 'Sign Up' }}
-      />
+      >
+        {props => (
+          <Suspense fallback={<ScreenLoader />}>
+            <SignupScreen {...props} />
+          </Suspense>
+        )}
+      </Stack.Screen>
     </Stack.Navigator>
   );
 }
@@ -125,24 +146,44 @@ function AppStack() {
       />
       <Stack.Screen
         name="Menu"
-        component={MenuScreen}
         options={{ title: 'Menu' }}
-      />
+      >
+        {props => (
+          <Suspense fallback={<ScreenLoader />}>
+            <MenuScreen {...props} />
+          </Suspense>
+        )}
+      </Stack.Screen>
       <Stack.Screen
         name="Map"
-        component={MapScreen}
         options={{ title: 'Find Trucks' }}
-      />
+      >
+        {props => (
+          <Suspense fallback={<ScreenLoader />}>
+            <MapScreen {...props} />
+          </Suspense>
+        )}
+      </Stack.Screen>
       <Stack.Screen
         name="Profile"
-        component={ProfileScreen}
         options={{ title: 'Profile' }}
-      />
+      >
+        {props => (
+          <Suspense fallback={<ScreenLoader />}>
+            <ProfileScreen {...props} />
+          </Suspense>
+        )}
+      </Stack.Screen>
       <Stack.Screen
         name="NotificationSettings"
-        component={NotificationSettingsScreen}
         options={{ title: 'Notification Settings' }}
-      />
+      >
+        {props => (
+          <Suspense fallback={<ScreenLoader />}>
+            <NotificationSettingsScreen {...props} />
+          </Suspense>
+        )}
+      </Stack.Screen>
     </Stack.Navigator>
   );
 }

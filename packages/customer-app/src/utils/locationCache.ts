@@ -1,4 +1,4 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { mmkvStorage } from './mmkvStorage';
 import type { Truck } from '@food-truck/shared';
 
 const CACHE_KEY = '@trucks_location_cache';
@@ -21,7 +21,7 @@ export const locationCache = {
         timestamp: Date.now(),
         userLocation,
       };
-      await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(data));
+      mmkvStorage.mmkvStorage.set(CACHE_KEY, JSON.stringify(data));
     } catch (error) {
       console.error('Error saving location cache:', error);
     }
@@ -29,7 +29,7 @@ export const locationCache = {
 
   async get(): Promise<{ trucks: Truck[]; userLocation?: { latitude: number; longitude: number } } | null> {
     try {
-      const cached = await AsyncStorage.getItem(CACHE_KEY);
+      const cached = mmkvStorage.mmkvStorage.getString(CACHE_KEY) ?? null;
       if (!cached) return null;
 
       const data: CachedData = JSON.parse(cached);
@@ -44,7 +44,7 @@ export const locationCache = {
       }
 
       // Cache expired
-      await AsyncStorage.removeItem(CACHE_KEY);
+      mmkvStorage.mmkvStorage.delete(CACHE_KEY);
       return null;
     } catch (error) {
       console.error('Error reading location cache:', error);
@@ -54,7 +54,7 @@ export const locationCache = {
 
   async clear() {
     try {
-      await AsyncStorage.removeItem(CACHE_KEY);
+      mmkvStorage.mmkvStorage.delete(CACHE_KEY);
     } catch (error) {
       console.error('Error clearing location cache:', error);
     }

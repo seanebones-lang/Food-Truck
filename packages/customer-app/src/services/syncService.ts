@@ -62,6 +62,18 @@ class SyncService {
     }
   }
 
+  /**
+   * Calculate exponential backoff delay in milliseconds
+   * Formula: baseDelay * (2 ^ retryCount) + jitter
+   */
+  private calculateBackoffDelay(retryCount: number, baseDelay: number = 1000): number {
+    const exponentialDelay = baseDelay * Math.pow(2, retryCount);
+    // Add random jitter (0-500ms) to prevent thundering herd
+    const jitter = Math.random() * 500;
+    // Cap at 30 seconds max
+    return Math.min(exponentialDelay + jitter, 30000);
+  }
+
   private async processAction(action: QueuedAction): Promise<SyncResult> {
     try {
       const accessToken = await storage.getAccessToken();
@@ -69,6 +81,13 @@ class SyncService {
         // Skip actions that require auth if not authenticated
         store.dispatch(dequeueAction(action.id));
         return { success: false, actionId: action.id, error: 'Not authenticated' };
+      }
+
+      // Apply exponential backoff if this is a retry
+      if (action.retryCount > 0) {
+        const delay = this.calculateBackoffDelay(action.retryCount);
+        console.log(`Waiting ${delay}ms before retry ${action.retryCount} for action ${action.id}`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
 
       let result: SyncResult;
@@ -96,9 +115,10 @@ class SyncService {
         );
         // Don't dequeue - let user resolve conflict
       } else {
-        // Retry logic
+        // Retry logic with exponential backoff
         if (action.retryCount < action.maxRetries) {
           store.dispatch(incrementRetry(action.id));
+          // The next sync attempt will apply the backoff delay
         } else {
           // Max retries reached, remove from queue
           store.dispatch(dequeueAction(action.id));
@@ -109,6 +129,16 @@ class SyncService {
       return result;
     } catch (error) {
       console.error(`Error processing action ${action.id}:`, error);
+      
+      // Retry on network errors with exponential backoff
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        if (action.retryCount < action.maxRetries) {
+          store.dispatch(incrementRetry(action.id));
+        } else {
+          store.dispatch(dequeueAction(action.id));
+        }
+      }
+      
       return {
         success: false,
         actionId: action.id,

@@ -1,9 +1,19 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+// Socket.io Redis adapter setup (will be initialized after Redis connection)
+let createAdapter;
+try {
+  const { createAdapter: adapter } = require('@socket.io/redis-adapter');
+  createAdapter = adapter;
+} catch (e) {
+  console.warn('Redis adapter not available, using default adapter');
+}
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { getRedisClient, cacheAnalytics, getCachedAnalytics, blocklistToken, isTokenBlocklisted, checkRateLimit } = require('./utils/redis');
+const prisma = require('./utils/prisma').default;
 require('dotenv').config();
 
 // Initialize Sentry for error tracking (must be before app creation in production)
@@ -34,16 +44,47 @@ if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
 
 const app = express();
 const server = http.createServer(app);
+
+// Initialize Socket.io
 const io = new Server(server, {
   cors: {
-    origin: '*',
+    origin: process.env.CORS_ORIGIN || '*',
     methods: ['GET', 'POST'],
   },
 });
 
+// Setup Redis adapter for Socket.io multi-instance support (if available)
+if (createAdapter) {
+  try {
+    const pubClient = getRedisClient();
+    const subClient = pubClient.duplicate();
+    io.adapter(createAdapter(pubClient, subClient));
+    console.log('✅ Socket.io Redis adapter enabled');
+  } catch (error) {
+    console.warn('⚠️  Failed to setup Redis adapter for Socket.io:', error.message);
+  }
+}
+
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'your-refresh-secret-key-change-in-production';
+
+// RS256 support (optional - falls back to HS256 if keys not provided)
+const fs = require('fs');
+let JWT_PRIVATE_KEY = null;
+let JWT_PUBLIC_KEY = null;
+let JWT_ALGORITHM = 'HS256';
+
+if (process.env.JWT_PRIVATE_KEY_PATH && process.env.JWT_PUBLIC_KEY_PATH) {
+  try {
+    JWT_PRIVATE_KEY = fs.readFileSync(process.env.JWT_PRIVATE_KEY_PATH, 'utf8');
+    JWT_PUBLIC_KEY = fs.readFileSync(process.env.JWT_PUBLIC_KEY_PATH, 'utf8');
+    JWT_ALGORITHM = 'RS256';
+    console.log('✅ RS256 JWT signing enabled');
+  } catch (error) {
+    console.warn('⚠️  Failed to load RS256 keys, falling back to HS256:', error.message);
+  }
+}
 
 // Sentry request handler (must be first middleware)
 if (Sentry) {
@@ -52,62 +93,43 @@ if (Sentry) {
 }
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || '*',
+  credentials: true,
+}));
 app.use(express.json({ limit: '10mb' }));
 
-// In-memory stores (replace with database in production)
-const users = [];
-const menus = [];
-const trucks = [];
-const orders = [];
-const pushTokens = new Map(); // userId -> { pushToken, platform }
-const notificationRateLimits = new Map(); // token -> lastNotificationTime
-
-// Analytics cache
-const analyticsCache = {
-  data: null,
-  timestamp: null,
-  TTL: 5 * 60 * 1000, // 5 minutes
+// Helper function to check if user is admin
+const isAdmin = async (req) => {
+  if (!req.user) return false;
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { role: true },
+  });
+  return user?.role === 'admin';
 };
-
-// Helper function to check if user is admin (in production, check user role)
-const isAdmin = (req) => {
-  // For now, all authenticated users are admins
-  // In production, check req.user.role === 'admin'
-  return !!req.user;
-};
-
-// Notification rate limit constant
-const NOTIFICATION_RATE_LIMIT_MS = 5000; // 5 seconds
-
-// Helper function to check rate limits
-function checkRateLimit(token) {
-  const lastTime = notificationRateLimits.get(token);
-  const now = Date.now();
-  
-  if (lastTime && now - lastTime < NOTIFICATION_RATE_LIMIT_MS) {
-    return false;
-  }
-  
-  notificationRateLimits.set(token, now);
-  return true;
-}
 
 // Helper functions
 const generateAccessToken = (user) => {
-  return jwt.sign(
-    { id: user.id, email: user.email },
-    JWT_SECRET,
-    { expiresIn: '15m' }
-  );
+  const payload = { id: user.id, email: user.email };
+  const options = { expiresIn: '15m' };
+  
+  if (JWT_ALGORITHM === 'RS256' && JWT_PRIVATE_KEY) {
+    return jwt.sign(payload, JWT_PRIVATE_KEY, { ...options, algorithm: 'RS256' });
+  }
+  
+  return jwt.sign(payload, JWT_SECRET, options);
 };
 
 const generateRefreshToken = (user) => {
-  return jwt.sign(
-    { id: user.id, email: user.email },
-    JWT_REFRESH_SECRET,
-    { expiresIn: '7d' }
-  );
+  const payload = { id: user.id, email: user.email };
+  const options = { expiresIn: '7d' };
+  
+  if (JWT_ALGORITHM === 'RS256' && JWT_PRIVATE_KEY) {
+    return jwt.sign(payload, JWT_PRIVATE_KEY, { ...options, algorithm: 'RS256' });
+  }
+  
+  return jwt.sign(payload, JWT_REFRESH_SECRET, options);
 };
 
 // Validation middleware
@@ -181,8 +203,8 @@ const validateSignup = (req, res, next) => {
   next();
 };
 
-// Auth middleware
-const authenticateToken = (req, res, next) => {
+// Auth middleware with blocklist check
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -193,7 +215,24 @@ const authenticateToken = (req, res, next) => {
     });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  // Check if token is blocklisted
+  const isBlocked = await isTokenBlocklisted(token);
+  if (isBlocked) {
+    return res.status(403).json({
+      success: false,
+      message: 'Token has been revoked',
+    });
+  }
+
+  // Determine verification key based on algorithm
+  const verifyKey = JWT_ALGORITHM === 'RS256' && JWT_PUBLIC_KEY 
+    ? JWT_PUBLIC_KEY 
+    : JWT_SECRET;
+  const verifyOptions = JWT_ALGORITHM === 'RS256' && JWT_PUBLIC_KEY
+    ? { algorithms: ['RS256'] }
+    : {};
+
+  jwt.verify(token, verifyKey, verifyOptions, async (err, user) => {
     if (err) {
       return res.status(403).json({
         success: false,
@@ -211,7 +250,10 @@ app.post('/api/auth/signup', validateSignup, async (req, res) => {
     const { name, email, password } = req.body;
 
     // Check if user already exists
-    const existingUser = users.find((u) => u.email === email);
+    const existingUser = await prisma.user.findUnique({
+      where: { email },
+    });
+    
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -223,15 +265,22 @@ app.post('/api/auth/signup', validateSignup, async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create user
-    const user = {
-      id: Date.now().toString(),
-      name,
-      email,
-      password: hashedPassword,
-      createdAt: new Date().toISOString(),
-    };
-
-    users.push(user);
+    const user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        passwordHash: hashedPassword,
+        role: 'customer',
+        notificationSettings: {
+          create: {
+            orderUpdates: true,
+            orderReady: true,
+            promotions: true,
+            truckNearby: true,
+          },
+        },
+      },
+    });
 
     // Generate tokens
     const accessToken = generateAccessToken(user);
@@ -265,7 +314,10 @@ app.post('/api/auth/login', validateLogin, async (req, res) => {
     const { email, password } = req.body;
 
     // Find user
-    const user = users.find((u) => u.email === email);
+    const user = await prisma.user.findUnique({
+      where: { email },
+    });
+    
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -274,7 +326,7 @@ app.post('/api/auth/login', validateLogin, async (req, res) => {
     }
 
     // Verify password
-    const isValidPassword = await bcrypt.compare(password, user.password);
+    const isValidPassword = await bcrypt.compare(password, user.passwordHash);
     if (!isValidPassword) {
       return res.status(401).json({
         success: false,
@@ -309,7 +361,7 @@ app.post('/api/auth/login', validateLogin, async (req, res) => {
   }
 });
 
-app.post('/api/auth/refresh', (req, res) => {
+app.post('/api/auth/refresh', async (req, res) => {
   try {
     const { refreshToken } = req.body;
 
@@ -320,7 +372,23 @@ app.post('/api/auth/refresh', (req, res) => {
       });
     }
 
-    jwt.verify(refreshToken, JWT_REFRESH_SECRET, (err, decoded) => {
+    // Check if refresh token is blocklisted
+    const isBlocked = await isTokenBlocklisted(refreshToken);
+    if (isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Refresh token has been revoked',
+      });
+    }
+
+    const verifyKey = JWT_ALGORITHM === 'RS256' && JWT_PUBLIC_KEY 
+      ? JWT_PUBLIC_KEY 
+      : JWT_REFRESH_SECRET;
+    const verifyOptions = JWT_ALGORITHM === 'RS256' && JWT_PUBLIC_KEY
+      ? { algorithms: ['RS256'] }
+      : {};
+
+    jwt.verify(refreshToken, verifyKey, verifyOptions, async (err, decoded) => {
       if (err) {
         return res.status(403).json({
           success: false,
@@ -328,7 +396,10 @@ app.post('/api/auth/refresh', (req, res) => {
         });
       }
 
-      const user = users.find((u) => u.id === decoded.id);
+      const user = await prisma.user.findUnique({
+        where: { id: decoded.id },
+      });
+      
       if (!user) {
         return res.status(404).json({
           success: false,
@@ -336,11 +407,28 @@ app.post('/api/auth/refresh', (req, res) => {
         });
       }
 
+      // Generate new access token
       const newAccessToken = generateAccessToken(user);
+
+      // Optionally rotate refresh token (security best practice)
+      // For now, we'll just return the new access token
+      const newRefreshToken = generateRefreshToken(user);
+
+      // Blocklist old refresh token
+      const decodedOld = jwt.decode(refreshToken);
+      if (decodedOld && decodedOld.exp) {
+        const expiresIn = decodedOld.exp - Math.floor(Date.now() / 1000);
+        if (expiresIn > 0) {
+          await blocklistToken(refreshToken, expiresIn);
+        }
+      }
 
       res.json({
         success: true,
-        accessToken: newAccessToken,
+        tokens: {
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken, // Rotated refresh token
+        },
       });
     });
   } catch (error) {
@@ -352,9 +440,19 @@ app.post('/api/auth/refresh', (req, res) => {
   }
 });
 
-app.get('/api/auth/profile', authenticateToken, (req, res) => {
+app.get('/api/auth/profile', authenticateToken, async (req, res) => {
   try {
-    const user = users.find((u) => u.id === req.user.id);
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        createdAt: true,
+      },
+    });
+    
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -364,12 +462,7 @@ app.get('/api/auth/profile', authenticateToken, (req, res) => {
 
     res.json({
       success: true,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        createdAt: user.createdAt,
-      },
+      user,
     });
   } catch (error) {
     console.error('Get profile error:', error);
@@ -380,18 +473,63 @@ app.get('/api/auth/profile', authenticateToken, (req, res) => {
   }
 });
 
+// POST /api/auth/logout - Logout and blocklist tokens
+app.post('/api/auth/logout', authenticateToken, async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    const refreshToken = req.body.refreshToken;
+
+    // Blocklist access token
+    if (token) {
+      try {
+        const decoded = jwt.decode(token);
+        if (decoded && decoded.exp) {
+          const expiresIn = decoded.exp - Math.floor(Date.now() / 1000);
+          if (expiresIn > 0) {
+            await blocklistToken(token, expiresIn);
+          }
+        }
+      } catch (error) {
+        console.error('Error blocklisting access token:', error);
+      }
+    }
+
+    // Blocklist refresh token
+    if (refreshToken) {
+      try {
+        const decoded = jwt.decode(refreshToken);
+        if (decoded && decoded.exp) {
+          const expiresIn = decoded.exp - Math.floor(Date.now() / 1000);
+          if (expiresIn > 0) {
+            await blocklistToken(refreshToken, expiresIn);
+          }
+        }
+      } catch (error) {
+        console.error('Error blocklisting refresh token:', error);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Logged out successfully',
+    });
+  } catch (error) {
+    console.error('Logout error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
 app.put('/api/auth/profile', authenticateToken, async (req, res) => {
   try {
     const { name, email } = req.body;
-    const user = users.find((u) => u.id === req.user.id);
     
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found',
-      });
-    }
-
     // Validate input
     if (name && name.length < 2) {
       return res.status(400).json({
@@ -410,8 +548,11 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
       }
 
       // Check if email is already taken by another user
-      const existingUser = users.find((u) => u.email === email && u.id !== user.id);
-      if (existingUser) {
+      const existingUser = await prisma.user.findUnique({
+        where: { email },
+      });
+      
+      if (existingUser && existingUser.id !== req.user.id) {
         return res.status(400).json({
           success: false,
           message: 'Email already in use',
@@ -420,18 +561,25 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
     }
 
     // Update user
-    if (name) user.name = name;
-    if (email) user.email = email;
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+
+    const user = await prisma.user.update({
+      where: { id: req.user.id },
+      data: updateData,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+      },
+    });
 
     res.json({
       success: true,
       message: 'Profile updated successfully',
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        createdAt: user.createdAt,
-      },
+      user,
     });
   } catch (error) {
     console.error('Update profile error:', error);
@@ -444,44 +592,47 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
 
 // Menu routes
 // GET /api/menus - Get all menu items (with optional filters)
-app.get('/api/menus', (req, res) => {
+app.get('/api/menus', async (req, res) => {
   try {
     const { category, search, minPrice, maxPrice, availableOnly } = req.query;
     
-    let filteredMenus = [...menus];
+    const where = {};
 
     // Filter by category
     if (category && category !== 'All') {
-      filteredMenus = filteredMenus.filter((item) => item.category === category);
+      where.category = category;
     }
 
     // Filter by search term
     if (search) {
-      const searchLower = search.toLowerCase();
-      filteredMenus = filteredMenus.filter(
-        (item) =>
-          item.name.toLowerCase().includes(searchLower) ||
-          item.description.toLowerCase().includes(searchLower)
-      );
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+      ];
     }
 
     // Filter by price range
-    if (minPrice) {
-      filteredMenus = filteredMenus.filter((item) => item.price >= parseFloat(minPrice));
-    }
-    if (maxPrice) {
-      filteredMenus = filteredMenus.filter((item) => item.price <= parseFloat(maxPrice));
+    if (minPrice || maxPrice) {
+      where.price = {};
+      if (minPrice) where.price.gte = parseFloat(minPrice);
+      if (maxPrice) where.price.lte = parseFloat(maxPrice);
     }
 
     // Filter by availability
     if (availableOnly === 'true') {
-      filteredMenus = filteredMenus.filter((item) => item.isAvailable && item.stock > 0);
+      where.isAvailable = true;
+      where.stock = { gt: 0 };
     }
+
+    const menus = await prisma.menuItem.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+    });
 
     res.json({
       success: true,
-      data: filteredMenus,
-      count: filteredMenus.length,
+      data: menus,
+      count: menus.length,
     });
   } catch (error) {
     console.error('Get menus error:', error);
@@ -493,9 +644,12 @@ app.get('/api/menus', (req, res) => {
 });
 
 // GET /api/menus/:id - Get single menu item
-app.get('/api/menus/:id', (req, res) => {
+app.get('/api/menus/:id', async (req, res) => {
   try {
-    const menuItem = menus.find((item) => item.id === req.params.id);
+    const menuItem = await prisma.menuItem.findUnique({
+      where: { id: req.params.id },
+    });
+    
     if (!menuItem) {
       return res.status(404).json({
         success: false,
@@ -517,8 +671,15 @@ app.get('/api/menus/:id', (req, res) => {
 });
 
 // POST /api/menus - Create menu item (admin only)
-app.post('/api/menus', authenticateToken, (req, res) => {
+app.post('/api/menus', authenticateToken, async (req, res) => {
   try {
+    if (!(await isAdmin(req))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required',
+      });
+    }
+
     const { name, description, price, category, imageUrl, stock, isAvailable, tags } = req.body;
 
     // Validation
@@ -536,25 +697,24 @@ app.post('/api/menus', authenticateToken, (req, res) => {
       });
     }
 
-    const newMenuItem = {
-      id: Date.now().toString(),
-      name,
-      description,
-      price: parseFloat(price),
-      category,
-      imageUrl: imageUrl || '',
-      stock: stock ? parseInt(stock) : 0,
-      isAvailable: isAvailable !== undefined ? isAvailable : true,
-      tags: tags || [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    menus.push(newMenuItem);
+    const newMenuItem = await prisma.menuItem.create({
+      data: {
+        name,
+        description,
+        price: parseFloat(price),
+        category,
+        imageUrl: imageUrl || '',
+        stock: stock ? parseInt(stock) : 0,
+        isAvailable: isAvailable !== undefined ? isAvailable : true,
+        tags: tags || [],
+      },
+    });
 
     // Broadcast update via Socket.io
     io.emit('menu:created', newMenuItem);
-    io.emit('menu:updated', { menus });
+    
+    // Invalidate analytics cache
+    await getRedisClient().del('analytics:dashboard');
 
     res.json({
       success: true,
@@ -571,45 +731,66 @@ app.post('/api/menus', authenticateToken, (req, res) => {
 });
 
 // PUT /api/menus/:id - Update menu item (admin only)
-app.put('/api/menus/:id', authenticateToken, (req, res) => {
+app.put('/api/menus/:id', authenticateToken, async (req, res) => {
   try {
-    const menuIndex = menus.findIndex((item) => item.id === req.params.id);
-    if (menuIndex === -1) {
+    if (!(await isAdmin(req))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required',
+      });
+    }
+
+    const { name, description, price, category, imageUrl, stock, isAvailable, tags } = req.body;
+
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (description !== undefined) updateData.description = description;
+    if (price !== undefined) updateData.price = parseFloat(price);
+    if (category) updateData.category = category;
+    if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
+    if (stock !== undefined) updateData.stock = parseInt(stock);
+    if (isAvailable !== undefined) updateData.isAvailable = isAvailable;
+    if (tags) updateData.tags = tags;
+
+    const updatedMenuItem = await prisma.menuItem.update({
+      where: { id: req.params.id },
+      data: updateData,
+    }).catch((error) => {
+      if (error.code === 'P2025') {
+        return null; // Not found
+      }
+      throw error;
+    });
+
+    if (!updatedMenuItem) {
       return res.status(404).json({
         success: false,
         message: 'Menu item not found',
       });
     }
 
-    const { name, description, price, category, imageUrl, stock, isAvailable, tags } = req.body;
-
-    // Update fields
-    if (name) menus[menuIndex].name = name;
-    if (description) menus[menuIndex].description = description;
-    if (price !== undefined) menus[menuIndex].price = parseFloat(price);
-    if (category) menus[menuIndex].category = category;
-    if (imageUrl !== undefined) menus[menuIndex].imageUrl = imageUrl;
-    if (stock !== undefined) menus[menuIndex].stock = parseInt(stock);
-    if (isAvailable !== undefined) menus[menuIndex].isAvailable = isAvailable;
-    if (tags) menus[menuIndex].tags = tags;
-
-    menus[menuIndex].updatedAt = new Date().toISOString();
-
     // Broadcast update via Socket.io
-    io.emit('menu:updated', { menuItem: menus[menuIndex], menus });
+    io.emit('menu:updated', { menuItem: updatedMenuItem });
     io.emit('stock:update', {
-      menuId: menus[menuIndex].id,
-      stock: menus[menuIndex].stock,
-      isAvailable: menus[menuIndex].isAvailable,
+      menuId: updatedMenuItem.id,
+      stock: updatedMenuItem.stock,
+      isAvailable: updatedMenuItem.isAvailable,
     });
+
+    // Invalidate analytics cache
+    const redisClient = getRedisClient();
+    await redisClient.del('analytics:dashboard');
 
     res.json({
       success: true,
       message: 'Menu item updated successfully',
-      data: menus[menuIndex],
+      data: updatedMenuItem,
     });
   } catch (error) {
     console.error('Update menu error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -618,21 +799,37 @@ app.put('/api/menus/:id', authenticateToken, (req, res) => {
 });
 
 // DELETE /api/menus/:id - Delete menu item (admin only)
-app.delete('/api/menus/:id', authenticateToken, (req, res) => {
+app.delete('/api/menus/:id', authenticateToken, async (req, res) => {
   try {
-    const menuIndex = menus.findIndex((item) => item.id === req.params.id);
-    if (menuIndex === -1) {
+    if (!(await isAdmin(req))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required',
+      });
+    }
+
+    const deletedItem = await prisma.menuItem.delete({
+      where: { id: req.params.id },
+    }).catch((error) => {
+      if (error.code === 'P2025') {
+        return null; // Not found
+      }
+      throw error;
+    });
+
+    if (!deletedItem) {
       return res.status(404).json({
         success: false,
         message: 'Menu item not found',
       });
     }
 
-    const deletedItem = menus.splice(menuIndex, 1)[0];
-
     // Broadcast update via Socket.io
     io.emit('menu:deleted', { id: req.params.id });
-    io.emit('menu:updated', { menus });
+    
+    // Invalidate analytics cache
+    const redisClient = getRedisClient();
+    await redisClient.del('analytics:dashboard');
 
     res.json({
       success: true,
@@ -641,6 +838,9 @@ app.delete('/api/menus/:id', authenticateToken, (req, res) => {
     });
   } catch (error) {
     console.error('Delete menu error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -665,7 +865,7 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 }
 
 // GET /api/trucks/nearby - Get nearby trucks
-app.get('/api/trucks/nearby', (req, res) => {
+app.get('/api/trucks/nearby', async (req, res) => {
   try {
     const { latitude, longitude, radius = 5, limit = 20 } = req.query;
 
@@ -681,17 +881,28 @@ app.get('/api/trucks/nearby', (req, res) => {
     const searchRadius = parseFloat(radius);
     const resultLimit = parseInt(limit);
 
-    // Filter active trucks and calculate distances
-    const nearbyTrucks = trucks
-      .filter((truck) => truck.isActive)
+    // Get all active trucks from database
+    const activeTrucks = await prisma.truck.findMany({
+      where: { isActive: true },
+    });
+
+    // Filter and calculate distances
+    const nearbyTrucks = activeTrucks
       .map((truck) => {
         const distance = calculateDistance(
           userLat,
           userLon,
-          truck.location.latitude,
-          truck.location.longitude
+          Number(truck.latitude),
+          Number(truck.longitude)
         );
-        return { ...truck, distance };
+        return {
+          ...truck,
+          location: {
+            latitude: Number(truck.latitude),
+            longitude: Number(truck.longitude),
+          },
+          distance,
+        };
       })
       .filter((truck) => truck.distance <= searchRadius)
       .sort((a, b) => a.distance - b.distance)
@@ -704,6 +915,9 @@ app.get('/api/trucks/nearby', (req, res) => {
     });
   } catch (error) {
     console.error('Get nearby trucks error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -712,15 +926,31 @@ app.get('/api/trucks/nearby', (req, res) => {
 });
 
 // GET /api/trucks - Get all trucks
-app.get('/api/trucks', (req, res) => {
+app.get('/api/trucks', async (req, res) => {
   try {
+    const allTrucks = await prisma.truck.findMany({
+      orderBy: { lastUpdated: 'desc' },
+    });
+
+    // Transform to include location object for compatibility
+    const trucksWithLocation = allTrucks.map((truck) => ({
+      ...truck,
+      location: {
+        latitude: Number(truck.latitude),
+        longitude: Number(truck.longitude),
+      },
+    }));
+
     res.json({
       success: true,
-      data: trucks,
-      count: trucks.length,
+      data: trucksWithLocation,
+      count: trucksWithLocation.length,
     });
   } catch (error) {
     console.error('Get trucks error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -729,9 +959,12 @@ app.get('/api/trucks', (req, res) => {
 });
 
 // GET /api/trucks/:id - Get single truck
-app.get('/api/trucks/:id', (req, res) => {
+app.get('/api/trucks/:id', async (req, res) => {
   try {
-    const truck = trucks.find((t) => t.id === req.params.id);
+    const truck = await prisma.truck.findUnique({
+      where: { id: req.params.id },
+    });
+
     if (!truck) {
       return res.status(404).json({
         success: false,
@@ -739,12 +972,24 @@ app.get('/api/trucks/:id', (req, res) => {
       });
     }
 
+    // Transform to include location object
+    const truckWithLocation = {
+      ...truck,
+      location: {
+        latitude: Number(truck.latitude),
+        longitude: Number(truck.longitude),
+      },
+    };
+
     res.json({
       success: true,
-      data: truck,
+      data: truckWithLocation,
     });
   } catch (error) {
     console.error('Get truck error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -753,8 +998,15 @@ app.get('/api/trucks/:id', (req, res) => {
 });
 
 // POST /api/trucks/location - Update truck location (admin)
-app.post('/api/trucks/location', authenticateToken, (req, res) => {
+app.post('/api/trucks/location', authenticateToken, async (req, res) => {
   try {
+    if (!(await isAdmin(req))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required',
+      });
+    }
+
     const { truckId, location, heading, speed } = req.body;
 
     if (!truckId || !location || !location.latitude || !location.longitude) {
@@ -777,39 +1029,48 @@ app.post('/api/trucks/location', authenticateToken, (req, res) => {
       });
     }
 
-    let truck = trucks.find((t) => t.id === truckId);
-
-    if (!truck) {
-      // Create new truck if it doesn't exist
-      truck = {
+    // Update or create truck
+    const truck = await prisma.truck.upsert({
+      where: { id: truckId },
+      update: {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        heading: heading !== undefined ? heading : undefined,
+        speed: speed !== undefined ? speed : undefined,
+      },
+      create: {
         id: truckId,
         name: `Truck ${truckId}`,
-        location,
+        latitude: location.latitude,
+        longitude: location.longitude,
         heading: heading || 0,
         speed: speed || 0,
         isActive: true,
-        lastUpdated: new Date().toISOString(),
-      };
-      trucks.push(truck);
-    } else {
-      // Update existing truck
-      truck.location = location;
-      if (heading !== undefined) truck.heading = heading;
-      if (speed !== undefined) truck.speed = speed;
-      truck.lastUpdated = new Date().toISOString();
-    }
+      },
+    });
+
+    // Transform for response
+    const truckWithLocation = {
+      ...truck,
+      location: {
+        latitude: Number(truck.latitude),
+        longitude: Number(truck.longitude),
+      },
+    };
 
     // Broadcast update via Socket.io
-    io.emit('truck:location:updated', truck);
-    io.emit('trucks:updated', { trucks });
+    io.emit('truck:location:updated', truckWithLocation);
 
     res.json({
       success: true,
       message: 'Truck location updated successfully',
-      data: truck,
+      data: truckWithLocation,
     });
   } catch (error) {
     console.error('Update truck location error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -818,38 +1079,63 @@ app.post('/api/trucks/location', authenticateToken, (req, res) => {
 });
 
 // PUT /api/trucks/:id - Update truck details (admin)
-app.put('/api/trucks/:id', authenticateToken, (req, res) => {
+app.put('/api/trucks/:id', authenticateToken, async (req, res) => {
   try {
-    const truckIndex = trucks.findIndex((t) => t.id === req.params.id);
-    if (truckIndex === -1) {
+    if (!(await isAdmin(req))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required',
+      });
+    }
+
+    const { name, driverName, isActive, schedule, estimatedWaitTime } = req.body;
+
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (driverName !== undefined) updateData.driverName = driverName;
+    if (isActive !== undefined) updateData.isActive = isActive;
+    if (schedule) updateData.schedule = schedule;
+    if (estimatedWaitTime !== undefined) updateData.estimatedWaitTime = estimatedWaitTime;
+
+    const updatedTruck = await prisma.truck.update({
+      where: { id: req.params.id },
+      data: updateData,
+    }).catch((error) => {
+      if (error.code === 'P2025') {
+        return null; // Not found
+      }
+      throw error;
+    });
+
+    if (!updatedTruck) {
       return res.status(404).json({
         success: false,
         message: 'Truck not found',
       });
     }
 
-    const { name, driverName, isActive, schedule, estimatedWaitTime } = req.body;
-
-    if (name) trucks[truckIndex].name = name;
-    if (driverName !== undefined) trucks[truckIndex].driverName = driverName;
-    if (isActive !== undefined) trucks[truckIndex].isActive = isActive;
-    if (schedule) trucks[truckIndex].schedule = schedule;
-    if (estimatedWaitTime !== undefined)
-      trucks[truckIndex].estimatedWaitTime = estimatedWaitTime;
-
-    trucks[truckIndex].lastUpdated = new Date().toISOString();
+    // Transform for response
+    const truckWithLocation = {
+      ...updatedTruck,
+      location: {
+        latitude: Number(updatedTruck.latitude),
+        longitude: Number(updatedTruck.longitude),
+      },
+    };
 
     // Broadcast update via Socket.io
-    io.emit('truck:updated', trucks[truckIndex]);
-    io.emit('trucks:updated', { trucks });
+    io.emit('truck:updated', truckWithLocation);
 
     res.json({
       success: true,
       message: 'Truck updated successfully',
-      data: trucks[truckIndex],
+      data: truckWithLocation,
     });
   } catch (error) {
     console.error('Update truck error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -858,24 +1144,39 @@ app.put('/api/trucks/:id', authenticateToken, (req, res) => {
 });
 
 // Socket.io connection handling
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   console.log('Client connected:', socket.id);
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
   });
 
-  // Send current menus to newly connected client
-  socket.emit('menu:updated', { menus });
-  // Send current trucks to newly connected client
-  socket.emit('trucks:updated', { trucks });
-  // Send current orders to newly connected client (for admin)
-  socket.emit('orders:updated', { orders });
+  // Send current data to newly connected client
+  try {
+    const [menus, trucks] = await Promise.all([
+      prisma.menuItem.findMany({ orderBy: { createdAt: 'desc' } }),
+      prisma.truck.findMany({ where: { isActive: true } }),
+    ]);
+
+    // Transform trucks to include location object
+    const trucksWithLocation = trucks.map((truck) => ({
+      ...truck,
+      location: {
+        latitude: Number(truck.latitude),
+        longitude: Number(truck.longitude),
+      },
+    }));
+
+    socket.emit('menu:updated', { menus });
+    socket.emit('trucks:updated', { trucks: trucksWithLocation });
+  } catch (error) {
+    console.error('Error sending initial data to socket:', error);
+  }
 });
 
 // Admin middleware
-const requireAdmin = (req, res, next) => {
-  if (!isAdmin(req)) {
+const requireAdmin = async (req, res, next) => {
+  if (!(await isAdmin(req))) {
     return res.status(403).json({
       success: false,
       message: 'Admin access required',
@@ -886,41 +1187,50 @@ const requireAdmin = (req, res, next) => {
 
 // Analytics routes (admin only)
 // GET /api/analytics/dashboard - Get dashboard metrics
-app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, (req, res) => {
+app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const now = Date.now();
+    const cacheKey = 'analytics:dashboard';
     
-    // Check cache
-    if (
-      analyticsCache.data &&
-      analyticsCache.timestamp &&
-      now - analyticsCache.timestamp < analyticsCache.TTL
-    ) {
+    // Check Redis cache
+    const cachedData = await getCachedAnalytics(cacheKey);
+    if (cachedData) {
       return res.json({
         success: true,
-        data: analyticsCache.data,
+        data: cachedData,
         cached: true,
       });
     }
 
-    // Calculate metrics
-    const totalOrders = orders.length;
-    const totalRevenue = orders.reduce((sum, order) => sum + order.total, 0);
+    // Calculate metrics using Prisma
+    const totalOrders = await prisma.order.count();
+    const completedOrders = await prisma.order.findMany({
+      where: { status: 'completed' },
+      select: { total: true },
+    });
+    const totalRevenue = completedOrders.reduce((sum, order) => sum + Number(order.total), 0);
     const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
     
     // Orders by status
+    const statusCounts = await prisma.order.groupBy({
+      by: ['status'],
+      _count: { status: true },
+    });
     const ordersByStatus = {
-      pending: orders.filter((o) => o.status === 'pending').length,
-      confirmed: orders.filter((o) => o.status === 'confirmed').length,
-      preparing: orders.filter((o) => o.status === 'preparing').length,
-      ready: orders.filter((o) => o.status === 'ready').length,
-      completed: orders.filter((o) => o.status === 'completed').length,
-      cancelled: orders.filter((o) => o.status === 'cancelled').length,
+      pending: 0,
+      confirmed: 0,
+      preparing: 0,
+      ready: 0,
+      completed: 0,
+      cancelled: 0,
     };
+    statusCounts.forEach(({ status, _count }) => {
+      ordersByStatus[status] = _count.status;
+    });
 
     // Revenue by day (last 7 days)
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
     
     const revenueByDay = {};
     for (let i = 0; i < 7; i++) {
@@ -930,20 +1240,34 @@ app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, (req, res) 
       revenueByDay[dateStr] = 0;
     }
 
-    orders.forEach((order) => {
+    const ordersInRange = await prisma.order.findMany({
+      where: {
+        createdAt: { gte: sevenDaysAgo },
+        status: 'completed',
+      },
+      select: { total: true, createdAt: true },
+    });
+
+    ordersInRange.forEach((order) => {
       const orderDate = new Date(order.createdAt).toISOString().split('T')[0];
       if (revenueByDay[orderDate] !== undefined) {
-        revenueByDay[orderDate] += order.total;
+        revenueByDay[orderDate] += Number(order.total);
       }
     });
 
     // Top selling items
+    const orderItems = await prisma.orderItem.findMany({
+      include: {
+        menuItem: {
+          select: { name: true },
+        },
+      },
+    });
+
     const itemCounts = {};
-    orders.forEach((order) => {
-      order.items.forEach((item) => {
-        const itemName = item.menuItem.name;
-        itemCounts[itemName] = (itemCounts[itemName] || 0) + item.quantity;
-      });
+    orderItems.forEach((item) => {
+      const itemName = item.menuItem.name;
+      itemCounts[itemName] = (itemCounts[itemName] || 0) + item.quantity;
     });
 
     const topSellingItems = Object.entries(itemCounts)
@@ -952,26 +1276,38 @@ app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, (req, res) 
       .slice(0, 5);
 
     // Payment status breakdown
+    const paymentStatusCounts = await prisma.order.groupBy({
+      by: ['paymentStatus'],
+      _count: { paymentStatus: true },
+    });
     const paymentStatusBreakdown = {
-      pending: orders.filter((o) => o.paymentStatus === 'pending').length,
-      processing: orders.filter((o) => o.paymentStatus === 'processing').length,
-      succeeded: orders.filter((o) => o.paymentStatus === 'succeeded').length,
-      failed: orders.filter((o) => o.paymentStatus === 'failed').length,
-      refunded: orders.filter((o) => o.paymentStatus === 'refunded').length,
+      pending: 0,
+      processing: 0,
+      succeeded: 0,
+      failed: 0,
+      refunded: 0,
     };
+    paymentStatusCounts.forEach(({ paymentStatus, _count }) => {
+      paymentStatusBreakdown[paymentStatus] = _count.paymentStatus;
+    });
 
     // Today's metrics
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const todayOrders = orders.filter(
-      (o) => new Date(o.createdAt) >= today
-    );
-    const todayRevenue = todayOrders.reduce((sum, o) => sum + o.total, 0);
+    const todayOrders = await prisma.order.findMany({
+      where: { createdAt: { gte: today } },
+      select: { total: true },
+    });
+    const todayRevenue = todayOrders.reduce((sum, o) => sum + Number(o.total), 0);
 
     // Menu availability
-    const totalMenuItems = menus.length;
-    const availableItems = menus.filter((m) => (m.isActive || m.isAvailable) && m.stock > 0).length;
-    const lowStockItems = menus.filter((m) => m.stock > 0 && m.stock < 10).length;
+    const totalMenuItems = await prisma.menuItem.count();
+    const availableItems = await prisma.menuItem.count({
+      where: { isAvailable: true, stock: { gt: 0 } },
+    });
+    const lowStockItems = await prisma.menuItem.count({
+      where: { stock: { gt: 0, lt: 10 } },
+    });
 
     const analytics = {
       overview: {
@@ -992,9 +1328,8 @@ app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, (req, res) 
       },
     };
 
-    // Update cache
-    analyticsCache.data = analytics;
-    analyticsCache.timestamp = now;
+    // Cache in Redis with 5 minute TTL
+    await cacheAnalytics(cacheKey, analytics, 300);
 
     res.json({
       success: true,
@@ -1011,21 +1346,30 @@ app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, (req, res) 
 });
 
 // GET /api/analytics/export - Export orders to CSV
-app.get('/api/analytics/export', authenticateToken, requireAdmin, (req, res) => {
+app.get('/api/analytics/export', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { format = 'csv', startDate, endDate } = req.query;
 
-    let filteredOrders = [...orders];
-
-    // Filter by date range if provided
+    const where = {};
     if (startDate || endDate) {
-      filteredOrders = filteredOrders.filter((order) => {
-        const orderDate = new Date(order.createdAt);
-        if (startDate && orderDate < new Date(startDate)) return false;
-        if (endDate && orderDate > new Date(endDate)) return false;
-        return true;
-      });
+      where.createdAt = {};
+      if (startDate) where.createdAt.gte = new Date(startDate);
+      if (endDate) where.createdAt.lte = new Date(endDate);
     }
+
+    const filteredOrders = await prisma.order.findMany({
+      where,
+      include: {
+        orderItems: {
+          include: {
+            menuItem: {
+              select: { name: true },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
 
     if (format === 'csv') {
       // Format for CSV export
@@ -1047,17 +1391,18 @@ app.get('/api/analytics/export', authenticateToken, requireAdmin, (req, res) => 
 
       // Data rows
       filteredOrders.forEach((order) => {
+        const itemsCount = order.orderItems.reduce((sum, item) => sum + item.quantity, 0);
         csvRows.push([
           order.id,
           order.userId || '',
           order.status,
           order.paymentStatus,
-          order.subtotal,
-          order.tax,
-          order.total,
-          order.items.reduce((sum, item) => sum + item.quantity, 0),
-          order.createdAt,
-          order.updatedAt,
+          order.subtotal.toString(),
+          order.tax.toString(),
+          order.total.toString(),
+          itemsCount.toString(),
+          order.createdAt.toISOString(),
+          order.updatedAt.toISOString(),
         ].join(','));
       });
 
@@ -1073,6 +1418,9 @@ app.get('/api/analytics/export', authenticateToken, requireAdmin, (req, res) => 
     }
   } catch (error) {
     console.error('Export error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1081,44 +1429,48 @@ app.get('/api/analytics/export', authenticateToken, requireAdmin, (req, res) => 
 });
 
 // GET /api/analytics/orders - Get orders with filters for analytics
-app.get('/api/analytics/orders', authenticateToken, requireAdmin, (req, res) => {
+app.get('/api/analytics/orders', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { status, paymentStatus, startDate, endDate, limit = 100 } = req.query;
 
-    let filteredOrders = [...orders];
-
-    // Apply filters
-    if (status) {
-      filteredOrders = filteredOrders.filter((o) => o.status === status);
-    }
-
-    if (paymentStatus) {
-      filteredOrders = filteredOrders.filter((o) => o.paymentStatus === paymentStatus);
-    }
-
+    const where = {};
+    if (status) where.status = status;
+    if (paymentStatus) where.paymentStatus = paymentStatus;
     if (startDate || endDate) {
-      filteredOrders = filteredOrders.filter((order) => {
-        const orderDate = new Date(order.createdAt);
-        if (startDate && orderDate < new Date(startDate)) return false;
-        if (endDate && orderDate > new Date(endDate)) return false;
-        return true;
-      });
+      where.createdAt = {};
+      if (startDate) where.createdAt.gte = new Date(startDate);
+      if (endDate) where.createdAt.lte = new Date(endDate);
     }
 
-    // Sort by date (newest first)
-    filteredOrders.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-    // Apply limit
-    const limitedOrders = filteredOrders.slice(0, parseInt(limit));
+    const [filteredOrders, total] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        include: {
+          orderItems: {
+            include: {
+              menuItem: {
+                select: { name: true, price: true },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: parseInt(limit),
+      }),
+      prisma.order.count({ where }),
+    ]);
 
     res.json({
       success: true,
-      data: limitedOrders,
-      count: limitedOrders.length,
-      total: filteredOrders.length,
+      data: filteredOrders,
+      count: filteredOrders.length,
+      total,
     });
   } catch (error) {
     console.error('Get analytics orders error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1141,12 +1493,14 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
       });
     }
 
-    // Validate items and check stock
+    // Validate items and check stock using Prisma transaction
     const validatedItems = [];
     let subtotal = 0;
 
     for (const orderItem of items) {
-      const menuItem = menus.find((item) => item.id === orderItem.menuItemId);
+      const menuItem = await prisma.menuItem.findUnique({
+        where: { id: orderItem.menuItemId },
+      });
       
       if (!menuItem) {
         return res.status(400).json({
@@ -1170,7 +1524,7 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
       }
 
       // Calculate item price with customizations
-      let itemPrice = menuItem.price;
+      let itemPrice = Number(menuItem.price);
       if (orderItem.customizations) {
         const customizationTotal = orderItem.customizations.reduce(
           (sum, custom) => sum + (custom.priceModifier || 0),
@@ -1181,11 +1535,6 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
 
       validatedItems.push({
         menuItemId: menuItem.id,
-        menuItem: {
-          id: menuItem.id,
-          name: menuItem.name,
-          price: menuItem.price,
-        },
         quantity: orderItem.quantity,
         price: itemPrice,
         customizations: orderItem.customizations || [],
@@ -1194,48 +1543,69 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
 
       subtotal += itemPrice * orderItem.quantity;
 
-      // Update stock
-      menuItem.stock -= orderItem.quantity;
+      // Update stock (will be committed in transaction)
+      await prisma.menuItem.update({
+        where: { id: menuItem.id },
+        data: { stock: { decrement: orderItem.quantity } },
+      });
     }
 
     const tax = subtotal * TAX_RATE;
     const total = subtotal + tax;
 
-    const order = {
-      id: `ORD-${Date.now()}`,
-      userId: req.user.id,
-      items: validatedItems,
-      subtotal: parseFloat(subtotal.toFixed(2)),
-      tax: parseFloat(tax.toFixed(2)),
-      total: parseFloat(total.toFixed(2)),
-      status: 'pending',
-      deliveryAddress,
-      pickupLocation,
-      contactPhone,
-      specialInstructions,
-      paymentIntentId,
-      paymentStatus: paymentIntentId ? 'processing' : 'pending',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    orders.push(order);
+    // Create order with items in a transaction
+    const order = await prisma.order.create({
+      data: {
+        userId: req.user.id,
+        subtotal: parseFloat(subtotal.toFixed(2)),
+        tax: parseFloat(tax.toFixed(2)),
+        total: parseFloat(total.toFixed(2)),
+        status: 'pending',
+        deliveryAddress,
+        pickupLocation,
+        contactPhone,
+        specialInstructions,
+        paymentIntentId,
+        paymentStatus: paymentIntentId ? 'processing' : 'pending',
+        orderItems: {
+          create: validatedItems,
+        },
+      },
+      include: {
+        orderItems: {
+          include: {
+            menuItem: {
+              select: { id: true, name: true, price: true },
+            },
+          },
+        },
+      },
+    });
 
     // Broadcast order creation via Socket.io
     io.emit('order:created', order);
-    io.emit('orders:updated', { orders });
-    io.emit('menu:updated', { menus }); // Stock updated
+    
+    // Invalidate analytics cache
+    const redisClient = getRedisClient();
+    await redisClient.del('analytics:dashboard');
 
     // Send notification to user if token is registered
-    const userToken = pushTokens.get(order.userId);
-    if (userToken && checkRateLimit(userToken.pushToken)) {
-      // In production, send via Expo Push API
-      io.emit('notification:user', {
-        userId: order.userId,
-        title: 'Order Confirmed!',
-        body: `Your order ${order.id} has been confirmed`,
-        data: { type: 'order_created', orderId: order.id },
-      });
+    const pushToken = await prisma.pushToken.findFirst({
+      where: { userId: order.userId },
+    });
+    
+    if (pushToken) {
+      const rateLimitKey = `notification:${pushToken.pushToken}`;
+      const rateLimit = await checkRateLimit(rateLimitKey, 1, 5); // 1 per 5 seconds
+      
+      if (rateLimit.allowed) {
+        io.emit('notification:user', {
+          userId: order.userId,
+          title: 'Order Confirmed!',
+          body: `Your order ${order.id} has been confirmed`,
+          data: { type: 'order_created', orderId: order.id },
+        });
+      }
     }
 
     res.json({
@@ -1245,17 +1615,37 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Create order error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
+      ...(process.env.NODE_ENV === 'development' && { error: error.message }),
     });
   }
 });
 
 // GET /api/orders - Get orders (user's orders or all for admin)
-app.get('/api/orders', authenticateToken, (req, res) => {
+app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
-    const userOrders = orders.filter((order) => order.userId === req.user.id);
+    const isAdminUser = await isAdmin(req);
+    const where = isAdminUser ? {} : { userId: req.user.id };
+
+    const userOrders = await prisma.order.findMany({
+      where,
+      include: {
+        orderItems: {
+          include: {
+            menuItem: {
+              select: { id: true, name: true, price: true },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
     res.json({
       success: true,
       data: userOrders,
@@ -1263,6 +1653,9 @@ app.get('/api/orders', authenticateToken, (req, res) => {
     });
   } catch (error) {
     console.error('Get orders error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1271,15 +1664,31 @@ app.get('/api/orders', authenticateToken, (req, res) => {
 });
 
 // GET /api/orders/all - Get all orders (admin only)
-app.get('/api/orders/all', authenticateToken, (req, res) => {
+app.get('/api/orders/all', authenticateToken, requireAdmin, async (req, res) => {
   try {
+    const allOrders = await prisma.order.findMany({
+      include: {
+        orderItems: {
+          include: {
+            menuItem: {
+              select: { id: true, name: true, price: true },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
     res.json({
       success: true,
-      data: orders,
-      count: orders.length,
+      data: allOrders,
+      count: allOrders.length,
     });
   } catch (error) {
     console.error('Get all orders error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1288,9 +1697,20 @@ app.get('/api/orders/all', authenticateToken, (req, res) => {
 });
 
 // GET /api/orders/:id - Get single order
-app.get('/api/orders/:id', authenticateToken, (req, res) => {
+app.get('/api/orders/:id', authenticateToken, async (req, res) => {
   try {
-    const order = orders.find((o) => o.id === req.params.id);
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: {
+        orderItems: {
+          include: {
+            menuItem: {
+              select: { id: true, name: true, price: true },
+            },
+          },
+        },
+      },
+    });
     
     if (!order) {
       return res.status(404).json({
@@ -1299,8 +1719,9 @@ app.get('/api/orders/:id', authenticateToken, (req, res) => {
       });
     }
 
-    // Users can only see their own orders
-    if (order.userId !== req.user.id) {
+    // Users can only see their own orders (unless admin)
+    const isAdminUser = await isAdmin(req);
+    if (!isAdminUser && order.userId !== req.user.id) {
       return res.status(403).json({
         success: false,
         message: 'Access denied',
@@ -1313,6 +1734,9 @@ app.get('/api/orders/:id', authenticateToken, (req, res) => {
     });
   } catch (error) {
     console.error('Get order error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1321,7 +1745,7 @@ app.get('/api/orders/:id', authenticateToken, (req, res) => {
 });
 
 // PUT /api/orders/:id/status - Update order status (admin only)
-app.put('/api/orders/:id/status', authenticateToken, (req, res) => {
+app.put('/api/orders/:id/status', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { status } = req.body;
     const validStatuses = ['pending', 'confirmed', 'preparing', 'ready', 'completed', 'cancelled'];
@@ -1333,48 +1757,84 @@ app.put('/api/orders/:id/status', authenticateToken, (req, res) => {
       });
     }
 
-    const orderIndex = orders.findIndex((o) => o.id === req.params.id);
-    if (orderIndex === -1) {
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: {
+        orderItems: {
+          include: {
+            menuItem: {
+              select: { id: true, name: true, price: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!order) {
       return res.status(404).json({
         success: false,
         message: 'Order not found',
       });
     }
 
-    orders[orderIndex].status = status;
-    orders[orderIndex].updatedAt = new Date().toISOString();
+    const updatedOrder = await prisma.order.update({
+      where: { id: req.params.id },
+      data: { status },
+      include: {
+        orderItems: {
+          include: {
+            menuItem: {
+              select: { id: true, name: true, price: true },
+            },
+          },
+        },
+      },
+    });
 
     // Broadcast update via Socket.io
-    io.emit('order:status:updated', orders[orderIndex]);
-    io.emit('orders:updated', { orders });
+    io.emit('order:status:updated', updatedOrder);
+
+    // Invalidate analytics cache
+    const redisClient = getRedisClient();
+    await redisClient.del('analytics:dashboard');
 
     // Send notification to user
-    const order = orders[orderIndex];
-    const userToken = pushTokens.get(order.userId);
-    if (userToken && checkRateLimit(userToken.pushToken)) {
-      let title = 'Order Update';
-      let body = `Your order ${order.id} status: ${status}`;
+    const pushToken = await prisma.pushToken.findFirst({
+      where: { userId: order.userId },
+    });
 
-      if (status === 'ready') {
-        title = 'Order Ready! 🎉';
-        body = `Your order ${order.id} is ready for pickup!`;
+    if (pushToken) {
+      const rateLimitKey = `notification:${pushToken.pushToken}`;
+      const rateLimit = await checkRateLimit(rateLimitKey, 1, 5);
+      
+      if (rateLimit.allowed) {
+        let title = 'Order Update';
+        let body = `Your order ${order.id} status: ${status}`;
+
+        if (status === 'ready') {
+          title = 'Order Ready! 🎉';
+          body = `Your order ${order.id} is ready for pickup!`;
+        }
+
+        io.emit('notification:user', {
+          userId: order.userId,
+          title,
+          body,
+          data: { type: 'order_status', orderId: order.id, status },
+        });
       }
-
-      io.emit('notification:user', {
-        userId: order.userId,
-        title,
-        body,
-        data: { type: 'order_status', orderId: order.id, status },
-      });
     }
 
     res.json({
       success: true,
       message: 'Order status updated',
-      data: orders[orderIndex],
+      data: updatedOrder,
     });
   } catch (error) {
     console.error('Update order status error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1417,29 +1877,59 @@ app.post('/api/payments/create-intent', authenticateToken, async (req, res) => {
 });
 
 // POST /api/payments/webhook - Stripe webhook handler
-app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     // In production, verify Stripe signature
     const event = req.body;
     
     if (event.type === 'payment_intent.succeeded') {
       const paymentIntent = event.data.object;
-      const order = orders.find((o) => o.paymentIntentId === paymentIntent.id);
+      const order = await prisma.order.findFirst({
+        where: { paymentIntentId: paymentIntent.id },
+        include: {
+          orderItems: {
+            include: {
+              menuItem: {
+                select: { id: true, name: true, price: true },
+              },
+            },
+          },
+        },
+      });
       
       if (order) {
-        order.paymentStatus = 'succeeded';
-        order.status = 'confirmed';
-        order.updatedAt = new Date().toISOString();
+        const updatedOrder = await prisma.order.update({
+          where: { id: order.id },
+          data: {
+            paymentStatus: 'succeeded',
+            status: 'confirmed',
+          },
+          include: {
+            orderItems: {
+              include: {
+                menuItem: {
+                  select: { id: true, name: true, price: true },
+                },
+              },
+            },
+          },
+        });
 
         // Broadcast update
-        io.emit('order:payment:succeeded', order);
-        io.emit('orders:updated', { orders });
+        io.emit('order:payment:succeeded', updatedOrder);
+        
+        // Invalidate analytics cache
+        const redisClient = getRedisClient();
+        await redisClient.del('analytics:dashboard');
       }
     }
 
     res.json({ received: true });
   } catch (error) {
     console.error('Webhook error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(400).json({
       success: false,
       message: 'Webhook error',
@@ -1449,7 +1939,7 @@ app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), (re
 
 // Notification routes
 // POST /api/notifications/register - Register push token
-app.post('/api/notifications/register', authenticateToken, (req, res) => {
+app.post('/api/notifications/register', authenticateToken, async (req, res) => {
   try {
     const { pushToken, platform } = req.body;
     const userId = req.user.id;
@@ -1461,7 +1951,31 @@ app.post('/api/notifications/register', authenticateToken, (req, res) => {
       });
     }
 
-    pushTokens.set(userId, { pushToken, platform, registeredAt: new Date().toISOString() });
+    if (!platform || !['ios', 'android', 'web'].includes(platform)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid platform (ios, android, web) is required',
+      });
+    }
+
+    // Upsert push token (user can have multiple tokens for different devices)
+    await prisma.pushToken.upsert({
+      where: {
+        userId_pushToken: {
+          userId: userId,
+          pushToken: pushToken,
+        },
+      },
+      update: {
+        lastUsed: new Date(),
+        platform,
+      },
+      create: {
+        userId,
+        pushToken,
+        platform,
+      },
+    });
 
     res.json({
       success: true,
@@ -1469,6 +1983,9 @@ app.post('/api/notifications/register', authenticateToken, (req, res) => {
     });
   } catch (error) {
     console.error('Register push token error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1488,6 +2005,26 @@ app.post('/api/notifications/send-promo', authenticateToken, requireAdmin, async
       });
     }
 
+    // Get push tokens based on target audience
+    let tokens;
+    if (targetAudience === 'subscribed') {
+      // Get users who have promotions enabled in their notification settings
+      const usersWithPromos = await prisma.user.findMany({
+        where: {
+          notificationSettings: {
+            promotions: true,
+          },
+        },
+        include: {
+          pushTokens: true,
+        },
+      });
+      tokens = usersWithPromos.flatMap((user) => user.pushTokens);
+    } else {
+      // Get all push tokens
+      tokens = await prisma.pushToken.findMany();
+    }
+
     // Broadcast via Socket.io
     io.emit('promo:alert', {
       title,
@@ -1502,10 +2039,13 @@ app.post('/api/notifications/send-promo', authenticateToken, requireAdmin, async
     res.json({
       success: true,
       message: 'Promotional notification sent',
-      sentTo: pushTokens.size,
+      sentTo: tokens.length,
     });
   } catch (error) {
     console.error('Send promo notification error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1514,7 +2054,7 @@ app.post('/api/notifications/send-promo', authenticateToken, requireAdmin, async
 });
 
 // POST /api/notifications/team-coordination - Send team coordination message (admin)
-app.post('/api/notifications/team-coordination', authenticateToken, requireAdmin, (req, res) => {
+app.post('/api/notifications/team-coordination', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { message, priority = 'normal', targetRole = 'all' } = req.body;
 
@@ -1525,12 +2065,18 @@ app.post('/api/notifications/team-coordination', authenticateToken, requireAdmin
       });
     }
 
+    // Get user info for sender
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { email: true, name: true },
+    });
+
     // Broadcast to admin clients via Socket.io
     io.emit('team:coordination', {
       message,
       priority,
       targetRole,
-      from: req.user.email,
+      from: user?.email || req.user.email,
       timestamp: new Date().toISOString(),
     });
 
@@ -1540,6 +2086,9 @@ app.post('/api/notifications/team-coordination', authenticateToken, requireAdmin
     });
   } catch (error) {
     console.error('Team coordination error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1547,86 +2096,8 @@ app.post('/api/notifications/team-coordination', authenticateToken, requireAdmin
   }
 });
 
-// Initialize with sample trucks
-trucks.push(
-  {
-    id: '1',
-    name: 'Food Truck #1',
-    driverName: 'John Doe',
-    location: { latitude: 37.7749, longitude: -122.4194 }, // San Francisco
-    heading: 90,
-    speed: 0,
-    isActive: true,
-    estimatedWaitTime: 5,
-    schedule: {
-      startTime: '09:00',
-      endTime: '17:00',
-      location: { latitude: 37.7749, longitude: -122.4194 },
-      address: '123 Market St, San Francisco, CA',
-    },
-    lastUpdated: new Date().toISOString(),
-  },
-  {
-    id: '2',
-    name: 'Food Truck #2',
-    driverName: 'Jane Smith',
-    location: { latitude: 37.7849, longitude: -122.4094 },
-    heading: 180,
-    speed: 5,
-    isActive: true,
-    estimatedWaitTime: 10,
-    schedule: {
-      startTime: '10:00',
-      endTime: '18:00',
-      location: { latitude: 37.7849, longitude: -122.4094 },
-      address: '456 Mission St, San Francisco, CA',
-    },
-    lastUpdated: new Date().toISOString(),
-  }
-);
-
-// Initialize with sample menu items
-menus.push(
-  {
-    id: '1',
-    name: 'Classic Burger',
-    description: 'Juicy beef patty with fresh vegetables',
-    price: 12.99,
-    category: 'Burgers',
-    imageUrl: '',
-    stock: 20,
-    isAvailable: true,
-    tags: ['popular', 'beef'],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: '2',
-    name: 'French Fries',
-    description: 'Crispy golden fries',
-    price: 4.99,
-    category: 'Sides',
-    imageUrl: '',
-    stock: 50,
-    isAvailable: true,
-    tags: ['vegetarian'],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: '3',
-    name: 'Cola',
-    description: 'Refreshing cola drink',
-    price: 2.99,
-    category: 'Drinks',
-    imageUrl: '',
-    stock: 100,
-    isAvailable: true,
-    tags: ['cold'],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  }
-);
+// Note: Sample data is now initialized via Prisma seed script
+// Run: yarn db:seed
 
 // Error handler must be before other error handlers and after all controllers
 if (Sentry) {

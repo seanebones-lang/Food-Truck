@@ -1,0 +1,140 @@
+// Prisma Schema for Food Truck Management System
+// Based on PostgreSQL database design
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(uuid())
+  name          String
+  email         String   @unique
+  passwordHash  String   @map("password_hash")
+  role          String   @default("customer") // 'customer' | 'admin'
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  orders            Order[]
+  pushTokens        PushToken[]
+  notificationSettings NotificationSettings?
+
+  @@map("users")
+}
+
+model MenuItem {
+  id          String   @id @default(uuid())
+  name        String
+  description String?  @db.Text
+  price       Decimal  @db.Decimal(10, 2)
+  category    String
+  imageUrl    String?  @map("image_url") @db.Text
+  stock       Int      @default(0)
+  isAvailable Boolean  @default(true) @map("is_available")
+  tags        String[] // Array of tags
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  orderItems OrderItem[]
+
+  @@index([category], map: "idx_menu_category")
+  @@index([isAvailable], map: "idx_menu_available")
+  @@map("menu_items")
+}
+
+model Order {
+  id                  String        @id @default(uuid())
+  userId              String        @map("user_id")
+  status              String        @default("pending") // 'pending' | 'confirmed' | 'preparing' | 'ready' | 'completed' | 'cancelled'
+  paymentStatus       String        @default("pending") @map("payment_status") // 'pending' | 'processing' | 'succeeded' | 'failed' | 'refunded'
+  subtotal            Decimal       @db.Decimal(10, 2)
+  tax                 Decimal       @db.Decimal(10, 2)
+  total               Decimal       @db.Decimal(10, 2)
+  deliveryAddress     String?       @map("delivery_address") @db.Text
+  pickupLocation      String?       @map("pickup_location") @db.Text
+  contactPhone        String?       @map("contact_phone") @db.VarChar(20)
+  specialInstructions String?       @map("special_instructions") @db.Text
+  paymentIntentId     String?       @map("payment_intent_id")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
+
+  @@index([userId], map: "idx_orders_user")
+  @@index([status], map: "idx_orders_status")
+  @@index([createdAt], map: "idx_orders_created")
+  @@index([createdAt, status], map: "idx_orders_date_status")
+  @@index([userId, status], map: "idx_orders_user_status")
+  @@index([createdAt, total], map: "idx_orders_revenue")
+  @@map("orders")
+}
+
+model OrderItem {
+  id                  String   @id @default(uuid())
+  orderId             String   @map("order_id")
+  menuItemId          String   @map("menu_item_id")
+  quantity            Int
+  price               Decimal  @db.Decimal(10, 2)
+  customizations      Json?    // Array of customization objects
+  specialInstructions String?  @map("special_instructions") @db.Text
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  order    Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem MenuItem @relation(fields: [menuItemId], references: [id])
+
+  @@index([orderId], map: "idx_order_items_order")
+  @@map("order_items")
+}
+
+model Truck {
+  id              String   @id @default(uuid())
+  name            String
+  driverName      String?  @map("driver_name")
+  latitude        Decimal  @db.Decimal(10, 8)
+  longitude       Decimal  @db.Decimal(11, 8)
+  heading         Decimal? @db.Decimal(5, 2)
+  speed           Decimal? @db.Decimal(5, 2)
+  isActive        Boolean  @default(true) @map("is_active")
+  estimatedWaitTime Int?   @map("estimated_wait_time")
+  schedule        Json?    // { startTime, endTime, location, address }
+  lastUpdated     DateTime @default(now()) @updatedAt @map("last_updated")
+
+  @@index([isActive], map: "idx_trucks_active")
+  // Note: PostGIS spatial index would be added manually if using PostGIS
+  // CREATE INDEX idx_trucks_location ON trucks USING GIST(location);
+  @@map("trucks")
+}
+
+model PushToken {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  pushToken    String   @map("push_token") @db.Text
+  platform     String   // 'ios' | 'android' | 'web'
+  registeredAt DateTime @default(now()) @map("registered_at")
+  lastUsed     DateTime? @map("last_used")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, pushToken], name: "userId_pushToken")
+  @@index([userId], map: "idx_push_tokens_user")
+  @@map("push_tokens")
+}
+
+model NotificationSettings {
+  id          String   @id @default(uuid())
+  userId      String   @unique @map("user_id")
+  orderUpdates Boolean @default(true) @map("order_updates")
+  orderReady  Boolean  @default(true) @map("order_ready")
+  promotions  Boolean  @default(true)
+  truckNearby Boolean  @default(true) @map("truck_nearby")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_settings")
+}

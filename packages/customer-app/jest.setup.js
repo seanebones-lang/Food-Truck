@@ -1,19 +1,55 @@
 import '@testing-library/jest-native/extend-expect';
 
-// Mock AsyncStorage
+// Mock MMKV
+jest.mock('react-native-mmkv', () => {
+  const storage = new Map();
+  return {
+    MMKV: jest.fn().mockImplementation(() => ({
+      set: jest.fn((key, value) => storage.set(key, value)),
+      getString: jest.fn((key) => storage.get(key) ?? null),
+      getNumber: jest.fn((key) => {
+        const val = storage.get(key);
+        return val ? Number(val) : undefined;
+      }),
+      getBoolean: jest.fn((key) => {
+        const val = storage.get(key);
+        return val === 'true' || val === true;
+      }),
+      delete: jest.fn((key) => storage.delete(key)),
+      clearAll: jest.fn(() => storage.clear()),
+      getAllKeys: jest.fn(() => Array.from(storage.keys())),
+    })),
+  };
+});
+
+// Mock expo-secure-store
+jest.mock('expo-secure-store', () => ({
+  setItemAsync: jest.fn(() => Promise.resolve()),
+  getItemAsync: jest.fn(() => Promise.resolve(null)),
+  deleteItemAsync: jest.fn(() => Promise.resolve()),
+}));
+
+// Mock AsyncStorage for backward compatibility (if still used anywhere)
 jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock')
 );
 
-// Mock storage utility
+// Mock storage utilities
 jest.mock('./src/utils/storage', () => ({
   storage: {
-    getAccessToken: jest.fn(),
-    getRefreshToken: jest.fn(),
-    setAccessToken: jest.fn(),
-    setRefreshToken: jest.fn(),
-    clearAll: jest.fn(),
-    getUser: jest.fn(),
+    getAccessToken: jest.fn(() => Promise.resolve(null)),
+    getRefreshToken: jest.fn(() => Promise.resolve(null)),
+    setTokens: jest.fn(() => Promise.resolve()),
+    clearTokens: jest.fn(() => Promise.resolve()),
+    clearAll: jest.fn(() => Promise.resolve()),
+    getUser: jest.fn(() => Promise.resolve(null)),
+    setUser: jest.fn(() => Promise.resolve()),
+    clearUser: jest.fn(() => Promise.resolve()),
+  },
+  userStorage: {
+    getUser: jest.fn(() => Promise.resolve(null)),
+    setUser: jest.fn(() => Promise.resolve()),
+    clearUser: jest.fn(() => Promise.resolve()),
   },
 }));
 
@@ -22,14 +58,24 @@ jest.mock('expo-location', () => ({
   requestForegroundPermissionsAsync: jest.fn(() =>
     Promise.resolve({ status: 'granted' })
   ),
+  requestBackgroundPermissionsAsync: jest.fn(() =>
+    Promise.resolve({ status: 'granted' })
+  ),
   getCurrentPositionAsync: jest.fn(() =>
     Promise.resolve({
       coords: {
         latitude: 37.7749,
         longitude: -122.4194,
+        accuracy: 10,
+        altitude: null,
+        altitudeAccuracy: null,
+        heading: null,
+        speed: null,
       },
+      timestamp: Date.now(),
     })
   ),
+  watchPositionAsync: jest.fn(() => Promise.resolve({ remove: jest.fn() })),
 }));
 
 jest.mock('expo-notifications', () => ({
@@ -43,6 +89,7 @@ jest.mock('expo-notifications', () => ({
   cancelAllScheduledNotificationsAsync: jest.fn(() => Promise.resolve()),
   addNotificationReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
   addNotificationResponseReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
+  getAllScheduledNotificationsAsync: jest.fn(() => Promise.resolve([])),
 }));
 
 jest.mock('expo-device', () => ({
@@ -68,8 +115,28 @@ jest.mock('socket.io-client', () => {
     off: jest.fn(),
     close: jest.fn(),
     connect: jest.fn(),
+    disconnect: jest.fn(),
+    id: 'mock-socket-id',
+    connected: true,
   }));
 });
+
+// Mock react-native-fast-image
+jest.mock('react-native-fast-image', () => ({
+  __esModule: true,
+  default: require('react-native').Image,
+  resizeMode: {
+    contain: 'contain',
+    cover: 'cover',
+    stretch: 'stretch',
+    center: 'center',
+  },
+  priority: {
+    low: 'low',
+    normal: 'normal',
+    high: 'high',
+  },
+}));
 
 // Mock i18n
 jest.mock('./src/i18n/config', () => ({

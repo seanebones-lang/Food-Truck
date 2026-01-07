@@ -1,16 +1,16 @@
 import { configureStore, combineReducers } from '@reduxjs/toolkit';
 import { persistStore, persistReducer, FLUSH, REHYDRATE, PAUSE, PERSIST, PURGE, REGISTER } from 'redux-persist';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { mmkvStorageAdapter } from '../utils/mmkvStorage';
 import { offlineQueueReducer } from './slices/offlineQueueSlice';
 import { connectivityReducer } from './slices/connectivitySlice';
 import { ordersReducer } from './slices/ordersSlice';
 import { userReducer } from './slices/userSlice';
 import { offlineMiddleware } from './middleware/offlineMiddleware';
 
-// Persist configuration for critical data
+// Persist configuration for critical data (using MMKV for faster performance)
 const persistConfig = {
   key: 'root',
-  storage: AsyncStorage,
+  storage: mmkvStorageAdapter,
   whitelist: ['orders', 'user', 'offlineQueue'], // Only persist critical data
   blacklist: ['connectivity'], // Don't persist connectivity state
 };
@@ -18,7 +18,7 @@ const persistConfig = {
 // Persist configuration for offline queue (highest priority)
 const queuePersistConfig = {
   key: 'offlineQueue',
-  storage: AsyncStorage,
+  storage: mmkvStorageAdapter,
   whitelist: ['queue', 'syncState'],
 };
 

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { mmkvZustandStorage } from '../utils/mmkvStorage';
 import type {
   MenuItem,
   CartItem,
@@ -186,7 +186,7 @@ export const useCartStore = create<CartStore>()(
     }),
     {
       name: cartPersistConfig.key,
-      storage: createJSONStorage(() => AsyncStorage),
+      storage: createJSONStorage(() => mmkvZustandStorage),
       partialize: (state) => {
         // Only persist items (as per whitelist in config)
         return { items: state.items };

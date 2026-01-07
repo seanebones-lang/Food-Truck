@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Layout, Menu, Button, message, Space } from 'antd';
+import { useState, useEffect, Suspense, lazy } from 'react';
+import { Layout, Menu, Button, message, Space, Spin } from 'antd';
 import {
   MenuOutlined,
   ShoppingCartOutlined,
@@ -12,9 +12,12 @@ import {
 import { io } from 'socket.io-client';
 import { MenuForm } from './components/MenuForm';
 import { LocationUpdate } from './components/LocationUpdate';
-import { Dashboard } from './pages/Dashboard';
-import { AnalyticsDashboard } from './pages/AnalyticsDashboard';
-import { Payments } from './pages/Payments';
+import { PromoAlert } from './components/PromoAlert';
+// Lazy load pages for code splitting
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const AnalyticsDashboard = lazy(() => import('./pages/AnalyticsDashboard'));
+const Payments = lazy(() => import('./pages/Payments'));
+const TeamCoordination = lazy(() => import('./components/TeamCoordination'));
 // Ant Design styles are imported via Vite plugin
 import './App.css';
 
@@ -104,16 +107,34 @@ function App() {
   };
 
   const renderContent = () => {
+    const LoadingFallback = () => (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '400px' }}>
+        <Spin size="large" />
+      </div>
+    );
+
     if (selectedKey === 'dashboard') {
-      return <Dashboard />;
+      return (
+        <Suspense fallback={<LoadingFallback />}>
+          <Dashboard />
+        </Suspense>
+      );
     }
 
     if (selectedKey === 'analytics') {
-      return <AnalyticsDashboard />;
+      return (
+        <Suspense fallback={<LoadingFallback />}>
+          <AnalyticsDashboard />
+        </Suspense>
+      );
     }
 
     if (selectedKey === 'payments') {
-      return <Payments />;
+      return (
+        <Suspense fallback={<LoadingFallback />}>
+          <Payments />
+        </Suspense>
+      );
     }
 
     if (selectedKey === 'locations') {
@@ -121,7 +142,11 @@ function App() {
     }
 
     if (selectedKey === 'team') {
-      return <TeamCoordination />;
+      return (
+        <Suspense fallback={<LoadingFallback />}>
+          <TeamCoordination />
+        </Suspense>
+      );
     }
 
     if (selectedKey === 'menus') {
