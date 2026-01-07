@@ -25,7 +25,7 @@
     "@react-native-elements/themed": "^3.4.3",
     "@react-navigation/native": "^8.0.0-alpha",
     "@react-navigation/native-stack": "^8.0.0-alpha",
-    "@stripe/stripe-react-native": "^0.37.2",
+    "@stripe/stripe-react-native": "^0.57.2",
     "expo": "~54.0.30",
     "expo-device": "~6.0.2",
     "expo-localization": "~15.0.2",
