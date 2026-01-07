@@ -16,7 +16,7 @@
     "@hookform/resolvers": "^3.9.1",
     "antd": "^6.1.4",
     "dayjs": "^1.11.10",
-    "firebase": "^11.2.0",
+    "firebase": "^12.7.0",
     "i18next": "^24.2.0",
     "papaparse": "^5.4.1",
     "@sentry/react": "^10.32.1",
