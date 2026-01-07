@@ -31,7 +31,7 @@
     "expo-localization": "~15.0.2",
     "expo-location": "~19.0.8",
     "expo-notifications": "~0.32.15",
-    "expo-secure-store": "~14.0.0",
+    "expo-secure-store": "~14.2.4",
     "expo-status-bar": "~3.0.9",
     "react-native-maps": "^1.26.20",
     "react": "18.3.1",
