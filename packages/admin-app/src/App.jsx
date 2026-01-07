@@ -13,6 +13,7 @@ import { io } from 'socket.io-client';
 import { MenuForm } from './components/MenuForm';
 import { LocationUpdate } from './components/LocationUpdate';
 import { PromoAlert } from './components/PromoAlert';
+import { ErrorBoundary } from './components/ErrorBoundary';
 // Lazy load pages for code splitting
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const AnalyticsDashboard = lazy(() => import('./pages/AnalyticsDashboard'));
@@ -254,71 +255,75 @@ function App() {
   ];
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
-      <Sider
-        collapsible
-        collapsed={collapsed}
-        onCollapse={setCollapsed}
-        theme="light"
-        width={200}
-        style={{
-          overflow: 'auto',
-          height: '100vh',
-          position: 'fixed',
-          left: 0,
-          top: 0,
-          bottom: 0,
-        }}
-      >
-        <div style={{ padding: '16px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
-          <h2 style={{ margin: 0, color: '#f4511e' }}>Food Truck Admin</h2>
-        </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[selectedKey]}
-          items={menuItems}
-          onClick={({ key }) => {
-            setSelectedKey(key);
-            setShowForm(false);
-          }}
-          style={{ borderRight: 0 }}
-        />
-      </Sider>
-      <Layout style={{ marginLeft: collapsed ? 80 : 200, transition: 'margin-left 0.2s' }}>
-        <Header
+    <ErrorBoundary>
+      <Layout style={{ minHeight: '100vh' }}>
+        <Sider
+          collapsible
+          collapsed={collapsed}
+          onCollapse={setCollapsed}
+          theme="light"
+          width={200}
           style={{
-            background: '#fff',
-            padding: '0 24px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+            overflow: 'auto',
+            height: '100vh',
+            position: 'fixed',
+            left: 0,
+            top: 0,
+            bottom: 0,
           }}
         >
-          <h1 style={{ margin: 0, fontSize: '20px' }}>Admin Portal</h1>
-          <Space>
-            {selectedKey === 'dashboard' && (
-              <Button type="primary" onClick={() => setShowPromoModal(true)}>
-                Send Promo
-              </Button>
-            )}
-            <Button icon={<LogoutOutlined />}>Logout</Button>
-          </Space>
-        </Header>
-        <Content
-          style={{
-            margin: '24px',
-            padding: '24px',
-            background: '#fff',
-            minHeight: 280,
-            borderRadius: '8px',
-          }}
-        >
-          {renderContent()}
-        </Content>
+          <div style={{ padding: '16px', textAlign: 'center', borderBottom: '1px solid #f0f0f0' }}>
+            <h2 style={{ margin: 0, color: '#f4511e' }}>Food Truck Admin</h2>
+          </div>
+          <Menu
+            mode="inline"
+            selectedKeys={[selectedKey]}
+            items={menuItems}
+            onClick={({ key }) => {
+              setSelectedKey(key);
+              setShowForm(false);
+            }}
+            style={{ borderRight: 0 }}
+          />
+        </Sider>
+        <Layout style={{ marginLeft: collapsed ? 80 : 200, transition: 'margin-left 0.2s' }}>
+          <Header
+            style={{
+              background: '#fff',
+              padding: '0 24px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+            }}
+          >
+            <h1 style={{ margin: 0, fontSize: '20px' }}>Admin Portal</h1>
+            <Space>
+              {selectedKey === 'dashboard' && (
+                <Button type="primary" onClick={() => setShowPromoModal(true)}>
+                  Send Promo
+                </Button>
+              )}
+              <Button icon={<LogoutOutlined />}>Logout</Button>
+            </Space>
+          </Header>
+          <Content
+            style={{
+              margin: '24px',
+              padding: '24px',
+              background: '#fff',
+              minHeight: 280,
+              borderRadius: '8px',
+            }}
+          >
+            <ErrorBoundary>
+              {renderContent()}
+            </ErrorBoundary>
+          </Content>
+        </Layout>
+        <PromoAlert visible={showPromoModal} onCancel={() => setShowPromoModal(false)} />
       </Layout>
-      <PromoAlert visible={showPromoModal} onCancel={() => setShowPromoModal(false)} />
-    </Layout>
+    </ErrorBoundary>
   );
 }
 

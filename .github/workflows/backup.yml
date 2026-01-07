@@ -1,0 +1,105 @@
+name: Automated Database Backup
+
+on:
+  schedule:
+    # Daily incremental backup at 2:00 AM UTC
+    - cron: '0 2 * * *'
+    # Weekly full backup on Sunday at 2:00 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      backup_type:
+        description: 'Backup type (full or incremental)'
+        required: true
+        default: 'incremental'
+        type: choice
+        options:
+          - incremental
+          - full
+      verify:
+        description: 'Verify backup after creation'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Determine backup type
+        id: backup_type
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            if [ "$(date +%u)" == "7" ]; then
+              echo "type=full" >> $GITHUB_OUTPUT
+            else
+              echo "type=incremental" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "type=${{ github.event.inputs.backup_type }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create backup
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_DIR: ./backups
+          BACKUP_RETENTION_DAYS: 30
+          BACKUP_COMPRESSION: true
+        run: |
+          chmod +x scripts/backup-database.sh
+          if [ "${{ steps.backup_type.outputs.type }}" == "full" ]; then
+            ./scripts/backup-database.sh --full ${{ github.event.inputs.verify && '--verify' || '' }}
+          else
+            ./scripts/backup-database.sh ${{ github.event.inputs.verify && '--verify' || '' }}
+          fi
+
+      - name: Upload backup to artifact storage
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-backup-${{ steps.backup_type.outputs.type }}-${{ github.run_number }}
+          path: backups/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload to cloud storage (optional)
+        if: env.UPLOAD_TO_CLOUD == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BACKUP_BUCKET }}
+        run: |
+          # Install AWS CLI
+          sudo apt-get install -y awscli
+          
+          # Upload to S3
+          aws s3 sync backups/ s3://$AWS_S3_BUCKET/backups/ \
+            --exclude "*.meta" \
+            --storage-class STANDARD_IA
+
+      - name: Send backup notification
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Database backup ${{ steps.backup_type.outputs.type }} completed
+            Run: ${{ github.run_number }}
+            Type: ${{ steps.backup_type.outputs.type }}
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Clean up old backups
+        run: |
+          find backups/ -name "*.sql*" -type f -mtime +30 -delete
+          find backups/ -name "*.meta" -type f -mtime +30 -delete

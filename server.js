@@ -32,6 +32,10 @@ const {
   resetFailedLoginAttempts,
   validatePassword,
 } = require('./middleware/security');
+const { auditLogMiddleware, logSecurityEvent: auditLog, queryAuditLogs, getAuditStatistics, AuditEventType, Severity } = require('./utils/auditLogger');
+const { generateSecret, generateTOTP, generateQRCodeURL, generateBackupCodes, hashBackupCode, verifyTOTP, verifyBackupCode } = require('./utils/totp');
+const { submitFeedback, getFeedbackById, queryFeedback, getFeedbackStatistics, updateFeedbackStatus } = require('./utils/feedback');
+const { recordCost, getCosts, getCostStatistics, getCostTrends, estimateMonthlyCost, CostCategory } = require('./utils/costMonitoring');
 const {
   healthCheck,
   setupGracefulShutdown,
@@ -154,6 +158,7 @@ app.use(...inputSanitization()); // Input sanitization (XSS, injection preventio
 app.use(validateInput); // Custom input validation
 app.use(requestSizeLimiter('10mb')); // Request size limiting
 app.use(requestTimeout(30000)); // Request timeout (30 seconds)
+app.use(auditLogMiddleware()); // Security audit logging
 app.use(performanceMonitor); // Performance monitoring
 app.use(compressionMetrics); // Compression metrics
 app.use(responseCacheHeaders); // Response caching headers
@@ -169,9 +174,9 @@ const isAdmin = async (req) => {
 };
 
 // Helper functions
-const generateAccessToken = (user) => {
+const generateAccessToken = (user, customOptions = {}) => {
   const payload = { id: user.id, email: user.email };
-  const options = { expiresIn: '15m' };
+  const options = { expiresIn: customOptions.expiresIn || '15m' };
   
   if (JWT_ALGORITHM === 'RS256' && JWT_PRIVATE_KEY) {
     return jwt.sign(payload, JWT_PRIVATE_KEY, { ...options, algorithm: 'RS256' });
@@ -658,6 +663,17 @@ app.post('/api/auth/login', authRateLimiter, validateLogin, validateEmail, async
     if (!user) {
       // Record failed attempt even if user doesn't exist (prevent user enumeration)
       await recordFailedLogin(email);
+      
+      // Log failed login attempt
+      await auditLog({
+        eventType: AuditEventType.LOGIN_FAILURE,
+        req,
+        res,
+        userEmail: email,
+        severity: Severity.WARNING,
+        errorMessage: 'Invalid email or password (user not found)',
+      });
+      
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password',
@@ -669,6 +685,21 @@ app.post('/api/auth/login', authRateLimiter, validateLogin, validateEmail, async
     if (!isValidPassword) {
       // Record failed login attempt
       const lockoutStatus = await recordFailedLogin(email);
+      
+      // Log failed login attempt
+      await auditLog({
+        eventType: AuditEventType.LOGIN_FAILURE,
+        req,
+        res,
+        userId: user.id,
+        userEmail: user.email,
+        severity: lockoutStatus.locked ? Severity.CRITICAL : Severity.WARNING,
+        errorMessage: 'Invalid password',
+        metadata: {
+          attempts: lockoutStatus.attempts,
+          locked: lockoutStatus.locked,
+        },
+      });
       
       if (lockoutStatus.locked) {
         return res.status(423).json({
@@ -687,9 +718,46 @@ app.post('/api/auth/login', authRateLimiter, validateLogin, validateEmail, async
     // Successful login - reset failed attempts
     await resetFailedLoginAttempts(email);
 
-    // Generate tokens
+    // Check if MFA is enabled
+    if (user.mfaEnabled) {
+      // Return temporary token for MFA verification
+      const tempToken = generateAccessToken(user, { expiresIn: '5m' }); // Short-lived token
+      
+      // Log successful password verification (before MFA)
+      await auditLog({
+        eventType: AuditEventType.LOGIN_SUCCESS,
+        req,
+        res,
+        userId: user.id,
+        userEmail: user.email,
+        severity: Severity.INFO,
+        metadata: {
+          step: 'password_verified',
+          requiresMFA: true,
+        },
+      });
+
+      return res.json({
+        success: true,
+        message: 'Password verified. MFA code required.',
+        requiresMFA: true,
+        tempToken, // Temporary token for MFA verification
+      });
+    }
+
+    // Generate tokens (MFA not enabled)
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
+
+    // Log successful login to audit log
+    await auditLog({
+      eventType: AuditEventType.LOGIN_SUCCESS,
+      req,
+      res,
+      userId: user.id,
+      userEmail: user.email,
+      severity: Severity.INFO,
+    });
 
     res.json({
       success: true,
@@ -863,12 +931,508 @@ app.post('/api/auth/logout', authenticateToken, async (req, res) => {
       }
     }
 
+    // Log logout to audit log
+    await auditLog({
+      eventType: AuditEventType.LOGOUT,
+      req,
+      res,
+      userId: req.user.id,
+      userEmail: req.user.email,
+      severity: Severity.INFO,
+    });
+
     res.json({
       success: true,
       message: 'Logged out successfully',
     });
   } catch (error) {
     console.error('Logout error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+// MFA Endpoints
+
+/**
+ * @swagger
+ * /api/auth/mfa/setup:
+ *   post:
+ *     summary: Setup MFA for user account
+ *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: MFA setup initiated
+ *       401:
+ *         description: Unauthorized
+ */
+app.post('/api/auth/mfa/setup', authenticateToken, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { email: true, mfaEnabled: true, mfaSecret: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    if (user.mfaEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'MFA is already enabled',
+      });
+    }
+
+    // Generate secret
+    const secret = generateSecret();
+    const qrCodeURL = generateQRCodeURL(secret, user.email);
+
+    // Store secret temporarily (user needs to verify before enabling)
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { mfaSecret: secret },
+    });
+
+    res.json({
+      success: true,
+      secret,
+      qrCodeURL,
+      message: 'Scan QR code with authenticator app and verify with a code',
+    });
+  } catch (error) {
+    console.error('MFA setup error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/mfa/verify-setup:
+ *   post:
+ *     summary: Verify MFA setup with TOTP code
+ *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - code
+ *             properties:
+ *               code:
+ *                 type: string
+ *                 description: TOTP code from authenticator app
+ *     responses:
+ *       200:
+ *         description: MFA enabled successfully
+ *       400:
+ *         description: Invalid code
+ */
+app.post('/api/auth/mfa/verify-setup', authenticateToken, async (req, res) => {
+  try {
+    const { code } = req.body;
+
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        message: 'TOTP code is required',
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { mfaSecret: true, mfaEnabled: true },
+    });
+
+    if (!user || !user.mfaSecret) {
+      return res.status(400).json({
+        success: false,
+        message: 'MFA setup not initiated',
+      });
+    }
+
+    if (user.mfaEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'MFA is already enabled',
+      });
+    }
+
+    // Verify TOTP code
+    const { verifyTOTP } = require('./utils/totp');
+    const isValid = verifyTOTP(user.mfaSecret, code);
+
+    if (!isValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid TOTP code',
+      });
+    }
+
+    // Generate backup codes
+    const backupCodes = generateBackupCodes(10);
+    const hashedBackupCodes = backupCodes.map(hashBackupCode);
+
+    // Enable MFA
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        mfaEnabled: true,
+        mfaBackupCodes: hashedBackupCodes,
+      },
+    });
+
+    // Log MFA enablement
+    await auditLog({
+      eventType: AuditEventType.CONFIGURATION_CHANGE,
+      req,
+      res,
+      userId: req.user.id,
+      userEmail: req.user.email,
+      severity: Severity.INFO,
+      metadata: {
+        action: 'mfa_enabled',
+      },
+    });
+
+    res.json({
+      success: true,
+      message: 'MFA enabled successfully',
+      backupCodes, // Return plain backup codes (user should save these)
+    });
+  } catch (error) {
+    console.error('MFA verify setup error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/mfa/verify:
+ *   post:
+ *     summary: Verify MFA code during login
+ *     tags: [Authentication]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - tempToken
+ *               - code
+ *             properties:
+ *               tempToken:
+ *                 type: string
+ *                 description: Temporary token from login
+ *               code:
+ *                 type: string
+ *                 description: TOTP code or backup code
+ *               isBackupCode:
+ *                 type: boolean
+ *                 description: Whether code is a backup code
+ *     responses:
+ *       200:
+ *         description: MFA verified, login successful
+ *       401:
+ *         description: Invalid code
+ */
+app.post('/api/auth/mfa/verify', async (req, res) => {
+  try {
+    const { tempToken, code, isBackupCode = false } = req.body;
+
+    if (!tempToken || !code) {
+      return res.status(400).json({
+        success: false,
+        message: 'Temporary token and MFA code are required',
+      });
+    }
+
+    // Verify temporary token
+    let decoded;
+    try {
+      decoded = jwt.verify(tempToken, process.env.JWT_SECRET);
+    } catch (error) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired temporary token',
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        createdAt: true,
+        mfaEnabled: true,
+        mfaSecret: true,
+        mfaBackupCodes: true,
+      },
+    });
+
+    if (!user || !user.mfaEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'MFA is not enabled for this account',
+      });
+    }
+
+    // Verify MFA code
+    const { verifyTOTP, verifyBackupCode: verifyBackup } = require('./utils/totp');
+    let isValid = false;
+
+    if (isBackupCode) {
+      isValid = verifyBackup(code, user.mfaBackupCodes || []);
+      if (isValid) {
+        // Remove used backup code
+        const hashedCode = hashBackupCode(code);
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            mfaBackupCodes: {
+              set: (user.mfaBackupCodes || []).filter(c => c !== hashedCode),
+            },
+          },
+        });
+      }
+    } else {
+      if (!user.mfaSecret) {
+        return res.status(400).json({
+          success: false,
+          message: 'MFA secret not found',
+        });
+      }
+      isValid = verifyTOTP(user.mfaSecret, code);
+    }
+
+    if (!isValid) {
+      // Log failed MFA attempt
+      await auditLog({
+        eventType: AuditEventType.LOGIN_FAILURE,
+        req,
+        res,
+        userId: user.id,
+        userEmail: user.email,
+        severity: Severity.WARNING,
+        errorMessage: 'Invalid MFA code',
+        metadata: {
+          mfaMethod: isBackupCode ? 'backup_code' : 'totp',
+        },
+      });
+
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid MFA code',
+      });
+    }
+
+    // Generate final tokens
+    const accessToken = generateAccessToken(user);
+    const refreshToken = generateRefreshToken(user);
+
+    // Log successful MFA verification and login
+    await auditLog({
+      eventType: AuditEventType.LOGIN_SUCCESS,
+      req,
+      res,
+      userId: user.id,
+      userEmail: user.email,
+      severity: Severity.INFO,
+      metadata: {
+        mfaMethod: isBackupCode ? 'backup_code' : 'totp',
+        mfaVerified: true,
+      },
+    });
+
+    res.json({
+      success: true,
+      message: 'MFA verified. Login successful.',
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        createdAt: user.createdAt,
+      },
+      tokens: {
+        accessToken,
+        refreshToken,
+      },
+    });
+  } catch (error) {
+    console.error('MFA verify error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/mfa/disable:
+ *   post:
+ *     summary: Disable MFA for user account
+ *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - code
+ *             properties:
+ *               code:
+ *                 type: string
+ *                 description: TOTP code or backup code to verify before disabling
+ *               isBackupCode:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: MFA disabled successfully
+ *       401:
+ *         description: Invalid code
+ */
+app.post('/api/auth/mfa/disable', authenticateToken, async (req, res) => {
+  try {
+    const { code, isBackupCode = false } = req.body;
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        mfaEnabled: true,
+        mfaSecret: true,
+        mfaBackupCodes: true,
+      },
+    });
+
+    if (!user || !user.mfaEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'MFA is not enabled',
+      });
+    }
+
+    // Verify code before disabling
+    if (code) {
+      const { verifyTOTP, verifyBackupCode: verifyBackup } = require('./utils/totp');
+      let isValid = false;
+
+      if (isBackupCode) {
+        isValid = verifyBackup(code, user.mfaBackupCodes || []);
+      } else {
+        if (user.mfaSecret) {
+          isValid = verifyTOTP(user.mfaSecret, code);
+        }
+      }
+
+      if (!isValid) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid MFA code',
+        });
+      }
+    }
+
+    // Disable MFA
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        mfaEnabled: false,
+        mfaSecret: null,
+        mfaBackupCodes: [],
+      },
+    });
+
+    // Log MFA disablement
+    await auditLog({
+      eventType: AuditEventType.CONFIGURATION_CHANGE,
+      req,
+      res,
+      userId: req.user.id,
+      userEmail: req.user.email,
+      severity: Severity.INFO,
+      metadata: {
+        action: 'mfa_disabled',
+      },
+    });
+
+    res.json({
+      success: true,
+      message: 'MFA disabled successfully',
+    });
+  } catch (error) {
+    console.error('MFA disable error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/mfa/status:
+ *   get:
+ *     summary: Get MFA status for current user
+ *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: MFA status
+ */
+app.get('/api/auth/mfa/status', authenticateToken, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        mfaEnabled: true,
+      },
+    });
+
+    res.json({
+      success: true,
+      mfaEnabled: user?.mfaEnabled || false,
+    });
+  } catch (error) {
+    console.error('MFA status error:', error);
     if (Sentry) {
       Sentry.captureException(error);
     }
@@ -926,6 +1490,19 @@ app.get('/api/auth/export-data', authenticateToken, async (req, res) => {
       dataExportedAt: new Date().toISOString(),
     };
 
+    // Log data export to audit log
+    await auditLog({
+      eventType: AuditEventType.DATA_EXPORT,
+      req,
+      res,
+      userId: user.id,
+      userEmail: user.email,
+      severity: Severity.INFO,
+      metadata: {
+        exportSize: JSON.stringify(exportData).length,
+      },
+    });
+
     res.json({ success: true, data: exportData });
   } catch (error) {
     const { handleError } = require('./utils/errorHandler');
@@ -966,6 +1543,20 @@ app.delete('/api/auth/delete-account', authenticateToken, async (req, res) => {
         errorCode: 'CONFIRMATION_REQUIRED',
       });
     }
+
+    // Log account deletion before deletion
+    await auditLog({
+      eventType: AuditEventType.DATA_DELETION,
+      req,
+      res,
+      userId: req.user.id,
+      userEmail: req.user.email,
+      severity: Severity.CRITICAL,
+      metadata: {
+        deletionType: 'account',
+        reason: 'user_request',
+      },
+    });
 
     await prisma.user.delete({ where: { id: req.user.id } });
     res.json({ success: true, message: 'Account deleted successfully' });
@@ -1950,6 +2541,17 @@ io.on('connection', async (socket) => {
 // Admin middleware
 const requireAdmin = async (req, res, next) => {
   if (!(await isAdmin(req))) {
+    // Log permission denied
+    await auditLog({
+      eventType: AuditEventType.PERMISSION_DENIED,
+      req,
+      res,
+      userId: req.user?.id,
+      userEmail: req.user?.email,
+      severity: Severity.WARNING,
+      errorMessage: 'Admin access required',
+    });
+    
     return res.status(403).json({
       success: false,
       message: 'Admin access required',
@@ -3157,12 +3759,762 @@ app.post('/api/notifications/team-coordination', authenticateToken, requireAdmin
       timestamp: new Date().toISOString(),
     });
 
+    // Log team coordination message
+    await auditLog({
+      eventType: AuditEventType.CONFIGURATION_CHANGE,
+      req,
+      res,
+      userId: req.user.id,
+      userEmail: req.user.email,
+      severity: Severity.INFO,
+      metadata: {
+        action: 'team_coordination',
+        priority,
+        targetRole,
+      },
+    });
+
     res.json({
       success: true,
       message: 'Team coordination message sent',
     });
   } catch (error) {
     console.error('Team coordination error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+// Audit Log API endpoints (admin only)
+/**
+ * @swagger
+ * /api/audit-logs:
+ *   get:
+ *     summary: Query audit logs (admin only)
+ *     tags: [Audit]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: eventType
+ *         schema:
+ *           type: string
+ *         description: Filter by event type
+ *       - in: query
+ *         name: userId
+ *         schema:
+ *           type: string
+ *         description: Filter by user ID
+ *       - in: query
+ *         name: severity
+ *         schema:
+ *           type: string
+ *           enum: [info, warning, error, critical]
+ *         description: Filter by severity
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Start date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: End date
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 100
+ *           maximum: 1000
+ *         description: Result limit
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *         description: Result offset
+ *     responses:
+ *       200:
+ *         description: Audit logs
+ *       403:
+ *         description: Admin access required
+ */
+app.get('/api/audit-logs', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const {
+      eventType,
+      userId,
+      severity,
+      startDate,
+      endDate,
+      limit = 100,
+      offset = 0,
+    } = req.query;
+
+    const result = await queryAuditLogs({
+      eventType,
+      userId,
+      severity,
+      startDate,
+      endDate,
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+    });
+
+    res.json({
+      success: true,
+      data: result.logs,
+      pagination: {
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+        hasMore: result.hasMore,
+      },
+    });
+  } catch (error) {
+    console.error('Query audit logs error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/audit-logs/statistics:
+ *   get:
+ *     summary: Get audit log statistics (admin only)
+ *     tags: [Audit]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Start date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: End date
+ *     responses:
+ *       200:
+ *         description: Audit log statistics
+ *       403:
+ *         description: Admin access required
+ */
+app.get('/api/audit-logs/statistics', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const statistics = await getAuditStatistics({
+      startDate,
+      endDate,
+    });
+
+    res.json({
+      success: true,
+      data: statistics,
+    });
+  } catch (error) {
+    console.error('Get audit statistics error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+// Feedback API endpoints
+
+/**
+ * @swagger
+ * /api/feedback:
+ *   post:
+ *     summary: Submit user feedback
+ *     tags: [Feedback]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - type
+ *               - message
+ *             properties:
+ *               type:
+ *                 type: string
+ *                 enum: [bug, feature, improvement, other]
+ *               message:
+ *                 type: string
+ *               rating:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 5
+ *               metadata:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Feedback submitted successfully
+ *       400:
+ *         description: Invalid feedback data
+ */
+app.post('/api/feedback', authenticateToken, async (req, res) => {
+  try {
+    const { type, message, rating, metadata } = req.body;
+
+    const feedback = await submitFeedback({
+      userId: req.user.id,
+      email: req.user.email,
+      type,
+      message,
+      rating,
+      metadata,
+    });
+
+    res.json({
+      success: true,
+      message: 'Feedback submitted successfully',
+      data: feedback,
+    });
+  } catch (error) {
+    console.error('Submit feedback error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Failed to submit feedback',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/feedback:
+ *   get:
+ *     summary: Query feedback (admin only)
+ *     tags: [Feedback]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: type
+ *         schema:
+ *           type: string
+ *           enum: [bug, feature, improvement, other]
+ *       - in: query
+ *         name: userId
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: minRating
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 5
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *           maximum: 100
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *     responses:
+ *       200:
+ *         description: Feedback list
+ *       403:
+ *         description: Admin access required
+ */
+app.get('/api/feedback', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const {
+      type,
+      userId,
+      minRating,
+      startDate,
+      endDate,
+      limit = 50,
+      offset = 0,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+    } = req.query;
+
+    const result = await queryFeedback({
+      type,
+      userId,
+      minRating: minRating ? parseInt(minRating) : undefined,
+      startDate,
+      endDate,
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      sortBy,
+      sortOrder,
+    });
+
+    res.json({
+      success: true,
+      data: result.feedback,
+      pagination: {
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+        hasMore: result.hasMore,
+      },
+    });
+  } catch (error) {
+    console.error('Query feedback error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/feedback/statistics:
+ *   get:
+ *     summary: Get feedback statistics (admin only)
+ *     tags: [Feedback]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: Feedback statistics
+ *       403:
+ *         description: Admin access required
+ */
+app.get('/api/feedback/statistics', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const statistics = await getFeedbackStatistics({
+      startDate,
+      endDate,
+    });
+
+    res.json({
+      success: true,
+      data: statistics,
+    });
+  } catch (error) {
+    console.error('Get feedback statistics error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/feedback/:id/status:
+ *   put:
+ *     summary: Update feedback status (admin only)
+ *     tags: [Feedback]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - status
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [new, reviewed, resolved, archived]
+ *     responses:
+ *       200:
+ *         description: Feedback status updated
+ *       403:
+ *         description: Admin access required
+ */
+app.put('/api/feedback/:id/status', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const feedback = await updateFeedbackStatus(id, status);
+
+    res.json({
+      success: true,
+      message: 'Feedback status updated',
+      data: feedback,
+    });
+  } catch (error) {
+    console.error('Update feedback status error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Failed to update feedback status',
+    });
+  }
+});
+
+// Cost Monitoring API endpoints (admin only)
+
+/**
+ * @swagger
+ * /api/costs:
+ *   post:
+ *     summary: Record cost entry (admin only)
+ *     tags: [Cost Monitoring]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - category
+ *               - service
+ *               - amount
+ *             properties:
+ *               category:
+ *                 type: string
+ *                 enum: [infrastructure, database, storage, network, compute, monitoring, security, third_party]
+ *               service:
+ *                 type: string
+ *               amount:
+ *                 type: number
+ *               currency:
+ *                 type: string
+ *                 default: USD
+ *               date:
+ *                 type: string
+ *                 format: date
+ *               metadata:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Cost recorded successfully
+ *       403:
+ *         description: Admin access required
+ */
+app.post('/api/costs', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { category, service, amount, currency, date, metadata } = req.body;
+
+    const cost = await recordCost({
+      category,
+      service,
+      amount,
+      currency,
+      date,
+      metadata,
+    });
+
+    res.json({
+      success: true,
+      message: 'Cost recorded successfully',
+      data: cost,
+    });
+  } catch (error) {
+    console.error('Record cost error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Failed to record cost',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/costs:
+ *   get:
+ *     summary: Get costs (admin only)
+ *     tags: [Cost Monitoring]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: service
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 100
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *     responses:
+ *       200:
+ *         description: Cost list
+ *       403:
+ *         description: Admin access required
+ */
+app.get('/api/costs', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const {
+      category,
+      service,
+      startDate,
+      endDate,
+      limit = 100,
+      offset = 0,
+    } = req.query;
+
+    const result = await getCosts({
+      category,
+      service,
+      startDate,
+      endDate,
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+    });
+
+    res.json({
+      success: true,
+      data: result.costs,
+      pagination: {
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+        hasMore: result.hasMore,
+      },
+    });
+  } catch (error) {
+    console.error('Get costs error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/costs/statistics:
+ *   get:
+ *     summary: Get cost statistics (admin only)
+ *     tags: [Cost Monitoring]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: Cost statistics
+ *       403:
+ *         description: Admin access required
+ */
+app.get('/api/costs/statistics', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const statistics = await getCostStatistics({
+      startDate,
+      endDate,
+    });
+
+    res.json({
+      success: true,
+      data: statistics,
+    });
+  } catch (error) {
+    console.error('Get cost statistics error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/costs/trends:
+ *   get:
+ *     summary: Get cost trends (admin only)
+ *     tags: [Cost Monitoring]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: Cost trends
+ *       403:
+ *         description: Admin access required
+ */
+app.get('/api/costs/trends', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const trends = await getCostTrends({
+      startDate,
+      endDate,
+    });
+
+    res.json({
+      success: true,
+      data: trends,
+    });
+  } catch (error) {
+    console.error('Get cost trends error:', error);
+    if (Sentry) {
+      Sentry.captureException(error);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/costs/estimate-monthly:
+ *   get:
+ *     summary: Estimate monthly cost (admin only)
+ *     tags: [Cost Monitoring]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *     responses:
+ *       200:
+ *         description: Monthly cost estimate
+ *       403:
+ *         description: Admin access required
+ */
+app.get('/api/costs/estimate-monthly', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const estimate = await estimateMonthlyCost({
+      startDate,
+      endDate,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        estimatedMonthlyCost: estimate,
+        currency: 'USD',
+      },
+    });
+  } catch (error) {
+    console.error('Estimate monthly cost error:', error);
     if (Sentry) {
       Sentry.captureException(error);
     }

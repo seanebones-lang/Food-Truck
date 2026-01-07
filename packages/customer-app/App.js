@@ -22,6 +22,7 @@ import { useNotifications } from './src/hooks/useNotifications';
 import { useConnectivity } from './src/hooks/useConnectivity';
 import { OfflineBanner } from './src/components/OfflineBanner';
 import { ConflictResolutionModal } from './src/components/ConflictResolutionModal';
+import { ErrorBoundary } from './src/components/ErrorBoundary';
 // Lazy load screens for code splitting
 import { lazy, Suspense } from 'react';
 import { ActivityIndicator, View } from 'react-native';
@@ -234,13 +235,15 @@ function AppContent() {
 
 export default function App() {
   return (
-    <I18nextProvider i18n={i18n}>
-      <Provider store={store}>
-        <PersistGate loading={<ActivityIndicator size="large" color="#f4511e" />} persistor={persistor}>
-          <AppContent />
-        </PersistGate>
-      </Provider>
-    </I18nextProvider>
+    <ErrorBoundary>
+      <I18nextProvider i18n={i18n}>
+        <Provider store={store}>
+          <PersistGate loading={<ActivityIndicator size="large" color="#f4511e" />} persistor={persistor}>
+            <AppContent />
+          </PersistGate>
+        </Provider>
+      </I18nextProvider>
+    </ErrorBoundary>
   );
 }
 

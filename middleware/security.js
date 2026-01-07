@@ -700,33 +700,72 @@ function validatePassword(password) {
  * 
  * @param {string} eventType - Type of security event (e.g., 'RATE_LIMIT_EXCEEDED', 'INVALID_TOKEN')
  * @param {Object} details - Additional event details
+ * @param {Object} req - Express request object (optional)
+ * @param {Object} res - Express response object (optional)
  * 
  * @returns {void}
  * 
  * @example
  * ```javascript
- * logSecurityEvent('RATE_LIMIT_EXCEEDED', { ip: '127.0.0.1', endpoint: '/api/auth/login' });
+ * logSecurityEvent('RATE_LIMIT_EXCEEDED', { ip: '127.0.0.1', endpoint: '/api/auth/login' }, req);
  * ```
  * 
- * In production, events should be sent to:
- * - SIEM (Security Information and Event Management)
- * - Security monitoring service
- * - Audit log system
+ * Events are logged to:
+ * - Audit log database (tamper-proof)
+ * - Console (development)
+ * - Sentry (if configured)
  * 
  * @see {@link https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final/control/ca-7|NIST CA-7}
  */
-const logSecurityEvent = (eventType, details) => {
-  const event = {
-    type: eventType,
-    timestamp: new Date().toISOString(),
-    details,
-  };
-  
-  // Log to console (in production, send to security monitoring system)
-  console.warn('[SECURITY EVENT]', JSON.stringify(event));
-  
-  // In production, send to SIEM or security monitoring service
-  // Example: sendToSIEM(event);
+const logSecurityEvent = async (eventType, details = {}, req = null, res = null) => {
+  try {
+    // Use audit logger for comprehensive logging
+    const { logSecurityEvent: auditLog } = require('../utils/auditLogger');
+    const { AuditEventType, Severity } = require('../utils/auditLogger');
+    
+    // Map event types to audit log event types
+    const eventTypeMap = {
+      'RATE_LIMIT_EXCEEDED': AuditEventType.RATE_LIMIT_EXCEEDED,
+      'ACCOUNT_LOCKED': AuditEventType.ACCOUNT_LOCKED,
+      'INVALID_TOKEN': AuditEventType.PERMISSION_DENIED,
+      'SSRF_ATTEMPT': AuditEventType.SSRF_ATTEMPT,
+      'INJECTION_ATTEMPT': AuditEventType.INJECTION_ATTEMPT,
+      'XSS_ATTEMPT': AuditEventType.XSS_ATTEMPT,
+      'SUSPICIOUS_ACTIVITY': AuditEventType.SUSPICIOUS_ACTIVITY,
+    };
+    
+    const auditEventType = eventTypeMap[eventType] || eventType;
+    const severity = details.severity || (eventType.includes('ATTEMPT') || eventType.includes('LOCKED') ? Severity.WARNING : Severity.INFO);
+    
+    // Log to audit log
+    await auditLog({
+      eventType: auditEventType,
+      req,
+      res,
+      userId: details.userId,
+      userEmail: details.email,
+      severity,
+      metadata: details,
+      errorMessage: details.error || details.message,
+    });
+    
+    // Also log to console in development
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[SECURITY EVENT]', JSON.stringify({
+        type: eventType,
+        timestamp: new Date().toISOString(),
+        details,
+      }));
+    }
+  } catch (error) {
+    // Fallback to console logging if audit logger fails
+    console.warn('[SECURITY EVENT]', JSON.stringify({
+      type: eventType,
+      timestamp: new Date().toISOString(),
+      details,
+    }));
+    console.error('[AUDIT LOG ERROR]', error);
+  }
 };
 
 module.exports = {

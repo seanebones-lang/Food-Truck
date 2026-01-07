@@ -16,12 +16,16 @@ model User {
   email         String   @unique
   passwordHash  String   @map("password_hash")
   role          String   @default("customer") // 'customer' | 'admin'
+  mfaEnabled    Boolean  @default(false) @map("mfa_enabled")
+  mfaSecret     String?  @map("mfa_secret")
+  mfaBackupCodes String[] @map("mfa_backup_codes") // Array of hashed backup codes
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
   orders            Order[]
   pushTokens        PushToken[]
   notificationSettings NotificationSettings?
+  feedback          Feedback[]
 
   @@map("users")
 }
@@ -144,4 +148,71 @@ model NotificationSettings {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("notification_settings")
+}
+
+model AuditLog {
+  id            String   @id @default(uuid())
+  eventType     String   @map("event_type") // 'LOGIN', 'LOGOUT', 'PERMISSION_DENIED', 'RATE_LIMIT', etc.
+  userId        String?  @map("user_id")
+  userEmail     String?  @map("user_email")
+  ipAddress     String?  @map("ip_address")
+  userAgent     String?  @map("user_agent") @db.Text
+  endpoint      String?
+  method        String?
+  statusCode    Int?     @map("status_code")
+  requestBody   Json?    @map("request_body")
+  responseBody  Json?    @map("response_body")
+  errorMessage  String?  @map("error_message") @db.Text
+  metadata      Json?    // Additional context
+  severity      String   @default("info") // 'info', 'warning', 'error', 'critical'
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([eventType], map: "idx_audit_event_type")
+  @@index([userId], map: "idx_audit_user")
+  @@index([createdAt], map: "idx_audit_created")
+  @@index([severity], map: "idx_audit_severity")
+  @@index([eventType, createdAt], map: "idx_audit_event_date")
+  @@index([userId, createdAt], map: "idx_audit_user_date")
+  @@map("audit_logs")
+}
+
+model Feedback {
+  id            String   @id @default(uuid())
+  userId        String?  @map("user_id")
+  email         String?
+  type          String   // 'bug', 'feature', 'improvement', 'other'
+  message       String   @db.Text
+  rating        Int?     // 1-5
+  status        String   @default("new") // 'new', 'reviewed', 'resolved', 'archived'
+  metadata      Json?    // Additional context
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([type], map: "idx_feedback_type")
+  @@index([userId], map: "idx_feedback_user")
+  @@index([status], map: "idx_feedback_status")
+  @@index([createdAt], map: "idx_feedback_created")
+  @@index([rating], map: "idx_feedback_rating")
+  @@index([type, status], map: "idx_feedback_type_status")
+  @@map("feedback")
+}
+
+model CostEntry {
+  id            String   @id @default(uuid())
+  category      String   // 'infrastructure', 'database', 'storage', etc.
+  service       String   // Service name (e.g., 'AWS EC2', 'Stripe')
+  amount        Decimal  @db.Decimal(10, 2)
+  currency      String   @default("USD")
+  date          DateTime @default(now())
+  metadata      Json?    // Additional cost details
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@index([category], map: "idx_cost_category")
+  @@index([service], map: "idx_cost_service")
+  @@index([date], map: "idx_cost_date")
+  @@index([category, date], map: "idx_cost_category_date")
+  @@map("cost_entries")
 }
