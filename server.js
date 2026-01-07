@@ -315,7 +315,53 @@ const authenticateToken = async (req, res, next) => {
   });
 };
 
-// Health check endpoint (no rate limiting)
+// Prometheus metrics endpoint (no authentication for scraping)
+app.get('/metrics', (req, res) => {
+  try {
+    const { getPrometheusMetrics } = require('./middleware/prometheus');
+    const metrics = getPrometheusMetrics();
+    res.setHeader('Content-Type', 'text/plain; version=0.0.4');
+    res.send(metrics);
+  } catch (error) {
+    console.error('Error generating Prometheus metrics:', error);
+    res.status(500).send('# ERROR generating metrics\n');
+  }
+});
+
+// Application metrics endpoint (admin only, JSON format)
+app.get('/api/metrics', authenticateToken, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (!(await isAdmin(req))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required',
+      });
+    }
+
+    const { getMetrics } = require('./utils/metrics');
+    const { getCacheMetrics } = require('./utils/redis');
+    
+    const metrics = getMetrics();
+    const cacheMetrics = getCacheMetrics();
+    
+    res.json({
+      success: true,
+      data: {
+        ...metrics,
+        cache: cacheMetrics,
+      },
+    });
+  } catch (error) {
+    console.error('Error getting metrics:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
+  }
+});
+
+// Health check endpoints (no rate limiting)
 app.get('/health', async (req, res) => {
   try {
     const health = await healthCheck();
@@ -332,12 +378,44 @@ app.get('/health', async (req, res) => {
 
 app.get('/api/health', async (req, res) => {
   try {
-    const health = await healthCheck();
+    const deep = req.query.deep === 'true';
+    const health = await healthCheck({ deep });
     const statusCode = health.status === 'healthy' ? 200 : 503;
     res.status(statusCode).json(health);
   } catch (error) {
     res.status(503).json({
       status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      error: error.message,
+    });
+  }
+});
+
+// Kubernetes-style liveness probe
+app.get('/health/live', async (req, res) => {
+  try {
+    const { livenessCheck } = require('./middleware/reliability');
+    const liveness = await livenessCheck();
+    res.status(200).json(liveness);
+  } catch (error) {
+    res.status(503).json({
+      status: 'dead',
+      timestamp: new Date().toISOString(),
+      error: error.message,
+    });
+  }
+});
+
+// Kubernetes-style readiness probe
+app.get('/health/ready', async (req, res) => {
+  try {
+    const { readinessCheck } = require('./middleware/reliability');
+    const readiness = await readinessCheck();
+    const statusCode = readiness.status === 'ready' ? 200 : 503;
+    res.status(statusCode).json(readiness);
+  } catch (error) {
+    res.status(503).json({
+      status: 'not_ready',
       timestamp: new Date().toISOString(),
       error: error.message,
     });
@@ -484,8 +562,17 @@ app.post('/api/auth/signup', authRateLimiter, validateSignup, validateEmail, asy
  *               email:
  *                 type: string
  *                 format: email
+ *                 example: 'user@example.com'
  *               password:
  *                 type: string
+ *                 format: password
+ *                 example: 'SecurePassword123!'
+ *           examples:
+ *             validLogin:
+ *               summary: Valid login
+ *               value:
+ *                 email: 'user@example.com'
+ *                 password: 'SecurePassword123!'
  *     responses:
  *       200:
  *         description: Login successful
@@ -505,12 +592,49 @@ app.post('/api/auth/signup', authRateLimiter, validateSignup, validateEmail, asy
  *                           type: string
  *                         refreshToken:
  *                           type: string
+ *             examples:
+ *               success:
+ *                 summary: Successful login
+ *                 value:
+ *                   success: true
+ *                   message: 'Login successful'
+ *                   user:
+ *                     id: '123e4567-e89b-12d3-a456-426614174000'
+ *                     name: 'John Doe'
+ *                     email: 'user@example.com'
+ *                     createdAt: '2026-01-03T12:00:00.000Z'
+ *                   tokens:
+ *                     accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+ *                     refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
  *       401:
  *         description: Invalid credentials
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *             examples:
+ *               invalidCredentials:
+ *                 summary: Invalid credentials
+ *                 value:
+ *                   success: false
+ *                   errorCode: 'INVALID_CREDENTIALS'
+ *                   message: 'Invalid email or password'
+ *                   statusCode: 401
+ *       423:
+ *         description: Account locked
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             examples:
+ *               accountLocked:
+ *                 summary: Account locked
+ *                 value:
+ *                   success: false
+ *                   errorCode: 'ACCOUNT_LOCKED'
+ *                   message: 'Account locked due to too many failed login attempts. Please try again after 2026-01-03 13:00:00.'
+ *                   statusCode: 423
+ *                   unlockAt: '2026-01-03T13:00:00.000Z'
  */
 app.post('/api/auth/login', authRateLimiter, validateLogin, validateEmail, async (req, res) => {
   try {
@@ -752,6 +876,102 @@ app.post('/api/auth/logout', authenticateToken, async (req, res) => {
       success: false,
       message: 'Internal server error',
     });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/export-data:
+ *   get:
+ *     summary: Export user data (GDPR data portability)
+ *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: User data exported successfully
+ *       401:
+ *         description: Unauthorized
+ */
+app.get('/api/auth/export-data', authenticateToken, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      include: {
+        orders: { include: { orderItems: true } },
+        pushTokens: true,
+        notificationSettings: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+        errorCode: 'USER_NOT_FOUND',
+      });
+    }
+
+    const exportData = {
+      profile: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+      },
+      orders: user.orders,
+      notificationSettings: user.notificationSettings,
+      dataExportedAt: new Date().toISOString(),
+    };
+
+    res.json({ success: true, data: exportData });
+  } catch (error) {
+    const { handleError } = require('./utils/errorHandler');
+    handleError(error, req, res);
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/delete-account:
+ *   delete:
+ *     summary: Delete user account (GDPR right to be forgotten)
+ *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [confirm]
+ *             properties:
+ *               confirm:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Account deleted successfully
+ *       400:
+ *         description: Confirmation required
+ */
+app.delete('/api/auth/delete-account', authenticateToken, async (req, res) => {
+  try {
+    if (req.body.confirm !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'Account deletion must be confirmed',
+        errorCode: 'CONFIRMATION_REQUIRED',
+      });
+    }
+
+    await prisma.user.delete({ where: { id: req.user.id } });
+    res.json({ success: true, message: 'Account deleted successfully' });
+  } catch (error) {
+    const { handleError } = require('./utils/errorHandler');
+    handleError(error, req, res);
   }
 });
 
@@ -1930,7 +2150,7 @@ app.get('/api/analytics/dashboard', authenticateToken, requireAdmin, async (req,
         totalOrders,
         totalRevenue: parseFloat(totalRevenue.toFixed(2)),
         averageOrderValue: parseFloat(averageOrderValue.toFixed(2)),
-        todayOrders: todayOrders.length,
+        todayOrders: todayOrdersCount,
         todayRevenue: parseFloat(todayRevenue.toFixed(2)),
       },
       ordersByStatus,
@@ -2960,18 +3180,16 @@ if (Sentry) {
   app.use(Sentry.Handlers.errorHandler());
 }
 
+// Use standardized error handler
+const { errorHandler } = require('./utils/errorHandler');
+
 // Optional fallthrough error handler
 app.use((err, req, res, next) => {
   if (Sentry) {
     Sentry.captureException(err);
   }
-  console.error('Unhandled error:', err);
-  res.statusCode = 500;
-  res.json({
-    success: false,
-    message: 'Internal server error',
-    ...(process.env.NODE_ENV === 'development' && { error: err.message }),
-  });
+  // Use standardized error handler
+  errorHandler(err, req, res, next);
 });
 
 // Setup Swagger documentation (development only)
@@ -2981,12 +3199,42 @@ if (process.env.NODE_ENV !== 'production') {
   console.log('📚 Swagger API documentation available at /api-docs');
 }
 
-server.listen(PORT, () => {
+/**
+ * Cache warming function
+ * Preloads frequently accessed data into cache on server startup
+ */
+async function warmCache() {
+  try {
+    console.log('🔥 Warming cache...');
+    
+    const { getMenuItemsOptimized, getTrucksOptimized } = require('./middleware/performance');
+    
+    // Warm menu items cache
+    await getMenuItemsOptimized({});
+    console.log('✅ Menu items cache warmed');
+    
+    // Warm active trucks cache
+    await getTrucksOptimized(true);
+    console.log('✅ Active trucks cache warmed');
+    
+    console.log('✅ Cache warming complete');
+  } catch (error) {
+    console.error('⚠️  Error warming cache:', error.message);
+    // Don't fail server startup if cache warming fails
+  }
+}
+
+server.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Socket.io server initialized`);
   if (process.env.NODE_ENV === 'production' && process.env.SENTRY_DSN) {
     console.log(`Sentry error tracking enabled`);
   }
+  
+  // Warm cache on startup (non-blocking)
+  warmCache().catch(err => {
+    console.error('Cache warming error:', err);
+  });
   
   // Setup graceful shutdown
   setupGracefulShutdown(server);

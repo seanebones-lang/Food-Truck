@@ -1,0 +1,64 @@
+{
+  "dashboard": {
+    "title": "System Health Dashboard",
+    "tags": ["system", "health"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Service Uptime",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "process_uptime_seconds",
+            "legendFormat": "Uptime"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "process_memory_usage_bytes{type=\"heap\"} / 1024 / 1024 / 1024",
+            "legendFormat": "Heap (GB)"
+          },
+          {
+            "expr": "process_memory_usage_bytes{type=\"rss\"} / 1024 / 1024 / 1024",
+            "legendFormat": "RSS (GB)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Error Count",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "http_errors_total",
+            "legendFormat": "Total Errors"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Node.js Version",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "nodejs_version_info",
+            "legendFormat": "Version"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+      }
+    ]
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "dashboard": {
+    "title": "Cache Performance Dashboard",
+    "tags": ["cache", "performance"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Cache Hit Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "cache_hit_rate",
+            "legendFormat": "Hit Rate"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Cache Operations",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(cache_operations_hits_total[5m])",
+            "legendFormat": "Hits/sec"
+          },
+          {
+            "expr": "rate(cache_operations_misses_total[5m])",
+            "legendFormat": "Misses/sec"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Total Cache Operations",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "cache_operations_hits_total + cache_operations_misses_total",
+            "legendFormat": "Total Operations"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Cache Hit Rate %",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "cache_hit_rate * 100",
+            "legendFormat": "Hit Rate %"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8}
+      }
+    ]
+  }
+}

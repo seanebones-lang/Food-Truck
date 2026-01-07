@@ -203,9 +203,12 @@ async function retryWithBackoff(fn, options = {}) {
  * - Database connectivity
  * - Redis connectivity
  * 
+ * @param {Object} options - Health check options
+ * @param {boolean} options.deep - Perform deep health check (default: false)
  * @returns {Promise<Object>} Health status object
  */
-async function healthCheck() {
+async function healthCheck(options = {}) {
+  const { deep = false } = options;
   const checks = {
     database: { status: 'unknown', responseTime: null, error: null },
     redis: { status: 'unknown', responseTime: null, error: null },
@@ -219,6 +222,13 @@ async function healthCheck() {
     await prisma.$queryRaw`SELECT 1`;
     checks.database.responseTime = Date.now() - dbStart;
     checks.database.status = 'healthy';
+    
+    // Deep check: test actual query performance
+    if (deep) {
+      const deepStart = Date.now();
+      await prisma.order.count({ take: 1 });
+      checks.database.deepCheckResponseTime = Date.now() - deepStart;
+    }
   } catch (error) {
     checks.database.status = 'unhealthy';
     checks.database.error = error.message;
@@ -231,6 +241,15 @@ async function healthCheck() {
     await client.ping();
     checks.redis.responseTime = Date.now() - redisStart;
     checks.redis.status = 'healthy';
+    
+    // Deep check: test cache operations
+    if (deep) {
+      const deepStart = Date.now();
+      await client.set('health:check', 'ok', 'EX', 10);
+      await client.get('health:check');
+      await client.del('health:check');
+      checks.redis.deepCheckResponseTime = Date.now() - deepStart;
+    }
   } catch (error) {
     checks.redis.status = 'unhealthy';
     checks.redis.error = error.message;
@@ -252,6 +271,37 @@ async function healthCheck() {
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
     responseTime: Date.now() - startTime,
+    version: process.env.npm_package_version || '2.0.0',
+  };
+}
+
+/**
+ * Liveness probe - checks if server is alive
+ * Simple check that server is responding
+ * 
+ * @returns {Promise<Object>} Liveness status
+ */
+async function livenessCheck() {
+  return {
+    status: 'alive',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  };
+}
+
+/**
+ * Readiness probe - checks if server is ready to serve traffic
+ * Verifies all dependencies are connected and functional
+ * 
+ * @returns {Promise<Object>} Readiness status
+ */
+async function readinessCheck() {
+  const health = await healthCheck({ deep: false });
+  
+  return {
+    status: health.status === 'healthy' ? 'ready' : 'not_ready',
+    checks: health.checks,
+    timestamp: new Date().toISOString(),
   };
 }
 
@@ -336,6 +386,8 @@ module.exports = {
   circuitBreakers,
   retryWithBackoff,
   healthCheck,
+  livenessCheck,
+  readinessCheck,
   requestTimeout,
   setupGracefulShutdown,
 };

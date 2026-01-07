@@ -1,0 +1,68 @@
+{
+  "dashboard": {
+    "title": "API Performance Dashboard",
+    "tags": ["api", "performance"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total[5m])",
+            "legendFormat": "Requests/sec"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Response Times",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "http_response_time_p50_seconds",
+            "legendFormat": "P50"
+          },
+          {
+            "expr": "http_response_time_p95_seconds",
+            "legendFormat": "P95"
+          },
+          {
+            "expr": "http_response_time_p99_seconds",
+            "legendFormat": "P99"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_by_status_total{status=\"5xx\"}[5m]) / rate(http_requests_total[5m])",
+            "legendFormat": "Error Rate"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Requests by Method",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "http_requests_by_method_total",
+            "legendFormat": "{{method}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      }
+    ]
+  }
+}

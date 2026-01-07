@@ -147,10 +147,50 @@ async function getMenuItemsOptimized(filters = {}) {
   }
   
   if (filters.search) {
-    where.OR = [
-      { name: { contains: filters.search, mode: 'insensitive' } },
-      { description: { contains: filters.search, mode: 'insensitive' } },
-    ];
+    // Use PostgreSQL full-text search for better performance (requires idx_menu_items_search GIN index)
+    // This is much faster than LIKE queries for large datasets
+    const searchTerm = filters.search.trim();
+    if (searchTerm) {
+      // Build WHERE clause conditions
+      let whereConditions = "to_tsvector('english', name || ' ' || COALESCE(description, '')) @@ plainto_tsquery('english', $1)";
+      const params = [searchTerm];
+      let paramIndex = 2;
+
+      if (filters.availableOnly) {
+        whereConditions += ` AND "isAvailable" = true AND stock > 0`;
+      }
+
+      if (filters.category && filters.category !== 'All') {
+        whereConditions += ` AND category = $${paramIndex}`;
+        params.push(filters.category);
+        paramIndex++;
+      }
+
+      // Use raw SQL for full-text search with Prisma
+      // Note: This requires the GIN index created in migration 20260104000000_add_fulltext_search
+      const query = `
+        SELECT id, name, description, price, category, "imageUrl", stock, "isAvailable", tags, "createdAt", "updatedAt"
+        FROM menu_items
+        WHERE ${whereConditions}
+        ORDER BY ts_rank(to_tsvector('english', name || ' ' || COALESCE(description, '')), plainto_tsquery('english', $1)) DESC
+        LIMIT 100
+      `;
+
+      const searchResults = await prisma.$queryRawUnsafe(query, ...params);
+      
+      // Map results to match expected format
+      return searchResults.map(item => ({
+        id: item.id,
+        name: item.name,
+        description: item.description,
+        price: item.price,
+        category: item.category,
+        imageUrl: item.imageUrl,
+        stock: item.stock,
+        isAvailable: item.isAvailable,
+        tags: item.tags,
+      }));
+    }
   }
   
   if (filters.availableOnly) {
@@ -244,6 +284,14 @@ function performanceMonitor(req, res, next) {
   res.end = function(...args) {
     const duration = Date.now() - startTime;
     const memoryDelta = process.memoryUsage().heapUsed - startMemory;
+
+    // Track metrics (if metrics module is available)
+    try {
+      const { trackHttpRequest } = require('../utils/metrics');
+      trackHttpRequest(req.method, req.path, res.statusCode, duration);
+    } catch (error) {
+      // Metrics module not available, continue without tracking
+    }
 
     // Log slow requests (>1 second)
     if (duration > 1000) {

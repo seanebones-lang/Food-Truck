@@ -1,308 +1,180 @@
 # Iteration 3: Improvement Plan
 **Date:** January 2026  
-**Target Score:** 92/100 → 96-98/100 (+4-6 points)  
-**Focus:** Polish, Documentation, UX Enhancements
+**Baseline Score:** 88/100  
+**Target Score:** 92/100  
+**Estimated Effort:** 18 hours
 
 ---
 
 ## Plan Overview
 
-Iteration 3 focuses on **polish and documentation** to push the system from 92/100 to 96-98/100. This iteration emphasizes maintainability, usability, and completeness.
-
-**Estimated Effort:** 14-18 hours  
-**Expected Outcome:** System score improvement from 92/100 to 96-98/100
+Iteration 3 focuses on database optimization, response time improvements, automated alerting, and advanced monitoring. Building on the Prometheus metrics foundation from Iteration 2, we'll optimize queries and add comprehensive alerting.
 
 ---
 
-## Task Breakdown
+## Phase 1: Database Index Optimization (Critical)
 
-### Phase 1: Pagination Implementation (Priority: HIGH)
+**Effort:** 4 hours  
+**Priority:** P0
 
-#### Task 1.1: Add Pagination to Menu Endpoint
-**Issue:** `/api/menus` returns all items, no pagination  
-**Location:** `server.js:866`  
-**Impact:** +1 point  
-**Effort:** 1 hour
+### Task 1.1: Add Missing Database Indexes
+- **Create Migration:** Add indexes via Prisma migration
+- **Indexes to Add:**
+  1. Menu Items: Composite `(isAvailable, stock)` for available items
+  2. Menu Items: Full-text search index (GIN) for name/description
+  3. Orders: Index on `paymentStatus`
+  4. Orders: Composite `(status, paymentStatus)`
+  5. Order Items: Index on `menuItemId`
+  6. Trucks: Index on `lastUpdated`
 
-**Solution:**
-1. Use existing `paginate` helper
-2. Add `page` and `limit` query parameters
-3. Return pagination metadata
+**Files to Create:**
+- `prisma/migrations/[timestamp]_add_performance_indexes/migration.sql`
 
-**Implementation:**
-```javascript
-// GET /api/menus - Add pagination
-app.get('/api/menus', async (req, res) => {
-  try {
-    const { category, search, minPrice, maxPrice, availableOnly, page = 1, limit = 20 } = req.query;
-    
-    const pageNum = parseInt(page) || 1;
-    const limitNum = Math.min(parseInt(limit) || 20, 100); // Max 100 per page
-    
-    const filters = { /* ... existing filters ... */ };
-    
-    // Get total count for pagination
-    const where = buildWhereClause(filters);
-    const total = await prisma.menuItem.count({ where });
-    
-    // Get paginated results
-    const menus = await prisma.menuItem.findMany({
-      where,
-      ...paginate(pageNum, limitNum),
-      orderBy: { createdAt: 'desc' },
-    });
-    
-    res.json({
-      success: true,
-      data: menus,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages: Math.ceil(total / limitNum),
-        hasNext: pageNum * limitNum < total,
-        hasPrev: pageNum > 1,
-      },
-    });
-  } catch (error) {
-    // ... error handling
-  }
-});
-```
+**Files to Modify:**
+- `prisma/schema.prisma` - Add index definitions
 
 ---
 
-#### Task 1.2: Add Pagination to Trucks Endpoint
-**Issue:** `/api/trucks` returns all trucks, no pagination  
-**Location:** `server.js:1000+`  
-**Impact:** +1 point  
-**Effort:** 1 hour
+## Phase 2: Query Performance Optimization (Critical)
 
-**Solution:**
-Similar to menu endpoint, add pagination with page/limit params.
+**Effort:** 4 hours  
+**Priority:** P0
 
----
+### Task 2.1: Add Slow Query Logging
+- **Solution:** Enable Prisma query logging with sampling
+- **Configuration:**
+  - Log queries >100ms
+  - Sample 10% of queries
+  - Track in metrics system
+- **Files to Modify:**
+  - `utils/prisma.ts` - Add query logging middleware
+  - `utils/metrics.js` - Track slow queries
 
-#### Task 1.3: Add Pagination to Orders Endpoint
-**Issue:** `/api/orders` returns all orders, no pagination  
-**Location:** `server.js:1200+`  
-**Impact:** +1 point  
-**Effort:** 1 hour
+### Task 2.2: Optimize Menu Search
+- **Issue:** Text search without full-text index
+- **Solution:**
+  - Use full-text search with GIN index
+  - Add search ranking
+  - Limit results appropriately
+- **Files to Modify:**
+  - `middleware/performance.js` - Optimize `getMenuItemsOptimized`
 
-**Solution:**
-Add pagination, especially important for users with many orders.
-
----
-
-### Phase 2: JSDoc Documentation (Priority: HIGH)
-
-#### Task 2.1: Document All Exported Functions
-**Issue:** Missing JSDoc on many functions  
-**Location:** All files  
-**Impact:** +4 points  
-**Effort:** 6-8 hours
-
-**Solution:**
-Add comprehensive JSDoc comments to all exported functions.
-
-**Template:**
-```javascript
-/**
- * Brief description of the function
- * 
- * @param {Type} paramName - Parameter description
- * @param {Type} [optionalParam] - Optional parameter description
- * @returns {Type} Return value description
- * @throws {ErrorType} When error occurs
- * 
- * @example
- * ```javascript
- * const result = functionName(param1, param2);
- * ```
- * 
- * @since 2.0.0
- */
-```
-
-**Files to Document:**
-- `server.js` - All route handlers
-- `middleware/security.js` - All middleware functions
-- `middleware/performance.js` - All utility functions
-- `middleware/reliability.js` - All reliability functions
-- `utils/redis.js` - All Redis utilities
-- `utils/prisma.ts` - Prisma client
+### Task 2.3: Response Time Optimization
+- **Target:** P95 <150ms
+- **Actions:**
+  - Review slow endpoints using metrics
+  - Optimize based on data
+  - Add query result limits where missing
 
 ---
 
-#### Task 2.2: Document Complex Logic
-**Issue:** Complex algorithms lack inline documentation  
-**Location:** Various files  
-**Impact:** +1 point  
-**Effort:** 2 hours
+## Phase 3: Automated Alerting (High Priority)
 
-**Solution:**
-Add inline comments explaining complex logic, especially:
-- Order creation transaction logic
-- Cache invalidation strategies
-- Rate limiting algorithms
-- Circuit breaker logic
+**Effort:** 4 hours  
+**Priority:** P1
 
----
+### Task 3.1: Alert Rules Configuration
+- **Solution:** Create alert rules file
+- **Alerts to Configure:**
+  1. Slow requests (>1s) - Warning
+  2. High error rates (>5%) - Critical
+  3. Health check failures - Critical
+  4. Low cache hit rates (<50%) - Warning
+  5. Database connection failures - Critical
+  6. High memory usage (>80%) - Warning
 
-### Phase 3: Architecture Decision Records (Priority: MEDIUM)
+**Files to Create:**
+- `alerts/rules.yml` - Prometheus alert rules
+- `docs/ALERTING.md` - Alerting documentation
 
-#### Task 3.1: Create ADR Template
-**Issue:** No ADR documentation  
-**Location:** `docs/adr/`  
-**Impact:** +2 points  
-**Effort:** 1 hour
-
-**Solution:**
-Create ADR template and initial ADRs for key decisions.
-
-**ADR Template:**
-```markdown
-# ADR-XXX: [Title]
-
-**Status:** [Proposed | Accepted | Deprecated | Superseded]  
-**Date:** YYYY-MM-DD  
-**Deciders:** [Team/Person]
-
-## Context
-[Describe the issue motivating this decision]
-
-## Decision
-[State the decision]
-
-## Consequences
-[Describe the consequences]
-
-## Alternatives Considered
-[Describe alternatives]
-```
-
-**Initial ADRs:**
-- ADR-001: Monorepo Architecture
-- ADR-002: Prisma ORM Choice
-- ADR-003: Redis Caching Strategy
-- ADR-004: JWT Authentication
-- ADR-005: Offline-First Architecture
+### Task 3.2: Alert Integration
+- **Solution:** Configure alert manager or webhook integration
+- **Options:**
+  - Prometheus Alertmanager
+  - Webhook to external service (Slack, PagerDuty, etc.)
+  - Email notifications
 
 ---
 
-#### Task 3.2: Document Code Organization
-**Issue:** Code structure not documented  
-**Location:** README.md  
-**Impact:** +1 point  
-**Effort:** 1 hour
+## Phase 4: Grafana Dashboard Setup (High Priority)
 
-**Solution:**
-Add code organization section to README explaining:
-- Monorepo structure
-- Package responsibilities
-- File naming conventions
-- Import patterns
-
----
-
-### Phase 4: UX Enhancements (Priority: MEDIUM)
-
-#### Task 4.1: Add Keyboard Shortcuts to Admin App
-**Issue:** No keyboard shortcuts  
-**Location:** Admin app  
-**Impact:** +2 points  
 **Effort:** 3 hours
+**Priority:** P1
 
-**Solution:**
-Add keyboard shortcuts for common actions:
-- `Ctrl/Cmd + K` - Search/Command palette
-- `Ctrl/Cmd + N` - New order/item
-- `Ctrl/Cmd + S` - Save
-- `Esc` - Close modals
-- `?` - Show shortcuts help
+### Task 4.1: Create Grafana Dashboards
+- **Dashboards to Create:**
+  1. API Performance Dashboard
+     - Request rate
+     - Response times (p50, p95, p99)
+     - Error rates
+     - Endpoint breakdown
+  2. Database Performance Dashboard
+     - Query count
+     - Slow queries
+     - Connection pool usage
+  3. Cache Performance Dashboard
+     - Hit/miss rates
+     - Cache operations
+     - Cache size
+  4. System Health Dashboard
+     - Health check status
+     - Memory usage
+     - CPU usage
+     - Uptime
 
-**Implementation:**
-```javascript
-// packages/admin-app/src/hooks/useKeyboardShortcuts.js
-import { useEffect } from 'react';
-
-export function useKeyboardShortcuts() {
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      // Ctrl/Cmd + K for search
-      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-        e.preventDefault();
-        // Open search
-      }
-      // ... other shortcuts
-    };
-    
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-}
-```
+**Files to Create:**
+- `grafana/dashboards/api-performance.json`
+- `grafana/dashboards/database-performance.json`
+- `grafana/dashboards/cache-performance.json`
+- `grafana/dashboards/system-health.json`
 
 ---
 
-#### Task 4.2: Enhance Loading States
-**Issue:** Some operations lack loading feedback  
-**Location:** Admin app, customer app  
-**Impact:** +1 point  
-**Effort:** 2 hours
+## Phase 5: Security Enhancements (Medium Priority)
 
-**Solution:**
-Add loading indicators to:
-- Form submissions
-- Data exports
-- Bulk operations
-- File uploads
+**Effort:** 3 hours  
+**Priority:** P2
 
----
+### Task 5.1: Token Security Enhancement
+- **Solution:** Add device fingerprinting
+- **Implementation:**
+  - Extract device info from request headers
+  - Include in token payload (optional)
+  - Validate on token refresh
+- **Files to Modify:**
+  - `server.js` - Enhance token generation
 
-#### Task 4.3: Add Tooltips and Help Text
-**Issue:** Some features lack explanation  
-**Location:** Admin app  
-**Impact:** +1 point  
-**Effort:** 2 hours
-
-**Solution:**
-Add tooltips using Ant Design's Tooltip component for:
-- Icon buttons
-- Complex form fields
-- Status indicators
-- Action buttons
+### Task 5.2: Security Test Suite
+- **Solution:** Add automated security tests
+- **Tests to Add:**
+  - SQL injection attempts
+  - XSS attempts
+  - Rate limiting validation
+  - Authentication bypass attempts
+- **Files to Create:**
+  - `__tests__/security/security.test.js`
 
 ---
 
 ## Implementation Order
 
-1. **Quick Wins** (Tasks 1.1-1.3, 3.1-3.2) - **4 hours**
-2. **Documentation** (Tasks 2.1-2.2) - **8 hours**
-3. **UX Enhancements** (Tasks 4.1-4.3) - **7 hours**
-
-**Total Estimated Time:** 19 hours
-
----
-
-## Success Criteria
-
-- ✅ Pagination on all list endpoints
-- ✅ Comprehensive JSDoc documentation (>90% coverage)
-- ✅ Architecture Decision Records created
-- ✅ Keyboard shortcuts in admin app
-- ✅ Loading states on all async operations
-- ✅ System score improves to 96-98/100
+1. **Database Indexes** (Phase 1) - Foundation for performance
+2. **Query Optimization** (Phase 2) - Immediate performance gains
+3. **Alerting** (Phase 3) - Depends on metrics (already available)
+4. **Grafana Dashboards** (Phase 4) - Visualize metrics
+5. **Security Enhancements** (Phase 5) - Can run parallel
 
 ---
 
-## Dependencies
+## Success Metrics
 
-- Existing `paginate` helper in `middleware/performance.js`
-- Ant Design components (Tooltip, etc.)
-- React hooks for keyboard shortcuts
+- **P95 Response Time:** <150ms (from 200ms)
+- **Database Query Performance:** <50ms average (from unknown)
+- **Cache Hit Rate:** >80% (maintain)
+- **Alert Coverage:** 6+ alert rules configured
+- **Dashboard Coverage:** 4 dashboards created
 
 ---
 
 **Plan Created:** January 2026  
-**Status:** Ready for Critique
+**Next Step:** Execute improvements

@@ -149,7 +149,24 @@ const options = {
           type: 'object',
           properties: {
             success: { type: 'boolean', example: false },
-            message: { type: 'string' },
+            errorCode: { 
+              type: 'string',
+              description: 'Error code for client-side translation',
+              example: 'INVALID_EMAIL'
+            },
+            message: { 
+              type: 'string',
+              example: 'Invalid email address'
+            },
+            statusCode: {
+              type: 'integer',
+              example: 400
+            },
+            timestamp: {
+              type: 'string',
+              format: 'date-time',
+              example: '2026-01-03T12:00:00.000Z'
+            },
           },
         },
         Success: {

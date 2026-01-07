@@ -1,51 +1,82 @@
 version: 2
 updates:
-  # Enable version updates for npm
+  # Enable version updates for npm (root package.json)
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:00"
     open-pull-requests-limit: 10
-    reviewers:
-      - "engineering-team"
     labels:
       - "dependencies"
-      - "automated"
+      - "security"
     commit-message:
       prefix: "chore"
+      prefix-development: "chore"
       include: "scope"
-    # Group updates for better PR management
+    # Group all minor and patch updates together
     groups:
       production-dependencies:
         dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
-  
-  # Customer app updates
+        update-types:
+          - "minor"
+          - "patch"
+    # Security updates should be immediate
+    ignore:
+      # Ignore major version updates (manual review required)
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  # Enable version updates for npm (customer-app package)
   - package-ecosystem: "npm"
     directory: "/packages/customer-app"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:00"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
       - "customer-app"
-  
-  # Admin app updates
+    groups:
+      production-dependencies:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Enable version updates for npm (admin-app package)
   - package-ecosystem: "npm"
     directory: "/packages/admin-app"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:00"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
       - "admin-app"
-  
-  # Shared package updates
+    groups:
+      production-dependencies:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Enable version updates for npm (shared package)
   - package-ecosystem: "npm"
     directory: "/packages/shared"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:00"
     open-pull-requests-limit: 3
     labels:
       - "dependencies"

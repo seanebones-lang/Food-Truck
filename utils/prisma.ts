@@ -18,14 +18,43 @@ const { PrismaClient } = require('@prisma/client');
  * 
  * @see {@link https://www.prisma.io/docs/concepts/components/prisma-client/connection-management|Prisma Connection Management}
  */
+// Query logging with slow query detection
+const logQueries = process.env.NODE_ENV === 'development' || process.env.ENABLE_QUERY_LOG === 'true';
+const logLevel = logQueries ? ['query', 'error', 'warn'] : ['error'];
+
 const prisma =
   global.prisma ||
   new PrismaClient({
-    log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+    log: logLevel,
     errorFormat: 'pretty',
     // Connection pooling is handled automatically by Prisma via DATABASE_URL
     // No additional configuration needed here
   });
+
+// Track slow queries if metrics available
+if (logQueries) {
+  prisma.$use(async (params, next) => {
+    const before = Date.now();
+    const result = await next(params);
+    const after = Date.now();
+    const duration = after - before;
+    
+    // Log slow queries (>100ms)
+    if (duration > 100) {
+      console.warn(`[SLOW QUERY] ${params.model}.${params.action} took ${duration}ms`);
+      
+      // Track in metrics if available
+      try {
+        const { trackDatabaseQuery } = require('./metrics');
+        trackDatabaseQuery(duration);
+      } catch (error) {
+        // Metrics not available, continue without tracking
+      }
+    }
+    
+    return result;
+  });
+}
 
 if (process.env.NODE_ENV !== 'production') {
   global.prisma = prisma;
