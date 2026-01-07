@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release-mobile:
+    name: Release Mobile Apps
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'yarn'
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build and submit iOS
+        run: |
+          cd packages/customer-app
+          eas build --platform ios --profile production --non-interactive --auto-submit
+        env:
+          EXPO_PUBLIC_ENV: production
+          EXPO_PUBLIC_API_URL: ${{ secrets.PRODUCTION_API_URL }}
+          EXPO_PUBLIC_SOCKET_URL: ${{ secrets.PRODUCTION_SOCKET_URL }}
+          EXPO_PUBLIC_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
+      - name: Build and submit Android
+        run: |
+          cd packages/customer-app
+          eas build --platform android --profile production --non-interactive --auto-submit
+        env:
+          EXPO_PUBLIC_ENV: production
+          EXPO_PUBLIC_API_URL: ${{ secrets.PRODUCTION_API_URL }}
+          EXPO_PUBLIC_SOCKET_URL: ${{ secrets.PRODUCTION_SOCKET_URL }}
+          EXPO_PUBLIC_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}

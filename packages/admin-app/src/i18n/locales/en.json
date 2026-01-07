@@ -1,0 +1,29 @@
+{
+  "common": {
+    "dashboard": "Dashboard",
+    "menus": "Menus",
+    "payments": "Payments",
+    "locations": "Truck Locations",
+    "team": "Team Coordination",
+    "logout": "Logout",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "totalRevenue": "Total Revenue",
+    "totalOrders": "Total Orders",
+    "completedOrders": "Completed Orders",
+    "averageOrderValue": "Average Order Value"
+  },
+  "accessibility": {
+    "dashboardLink": "Navigate to dashboard",
+    "menusLink": "Navigate to menus",
+    "paymentsLink": "Navigate to payments",
+    "locationsLink": "Navigate to truck locations",
+    "teamLink": "Navigate to team coordination",
+    "logoutButton": "Logout button"
+  }
+}

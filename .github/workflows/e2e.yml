@@ -1,0 +1,76 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  e2e-ios:
+    name: E2E Tests (iOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'yarn'
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Install pods
+        run: cd packages/customer-app/ios && pod install
+
+      - name: Build app for testing
+        run: cd packages/customer-app && npm run test:e2e:build-ios
+        env:
+          EXPO_PUBLIC_ENV: staging
+
+      - name: Run Detox tests
+        run: cd packages/customer-app && npm run test:e2e --configuration ios.sim.debug
+
+  e2e-android:
+    name: E2E Tests (Android)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'yarn'
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build app for testing
+        run: cd packages/customer-app && npm run test:e2e:build-android
+        env:
+          EXPO_PUBLIC_ENV: staging
+
+      - name: Run Detox tests
+        run: cd packages/customer-app && npm run test:e2e --configuration android.emu.debug

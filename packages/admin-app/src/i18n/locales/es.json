@@ -1,0 +1,29 @@
+{
+  "common": {
+    "dashboard": "Panel",
+    "menus": "Menús",
+    "payments": "Pagos",
+    "locations": "Ubicaciones de Camiones",
+    "team": "Coordinación del Equipo",
+    "logout": "Cerrar Sesión",
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "delete": "Eliminar",
+    "edit": "Editar"
+  },
+  "dashboard": {
+    "title": "Panel",
+    "totalRevenue": "Ingresos Totales",
+    "totalOrders": "Pedidos Totales",
+    "completedOrders": "Pedidos Completados",
+    "averageOrderValue": "Valor Promedio del Pedido"
+  },
+  "accessibility": {
+    "dashboardLink": "Navegar al panel",
+    "menusLink": "Navegar a menús",
+    "paymentsLink": "Navegar a pagos",
+    "locationsLink": "Navegar a ubicaciones de camiones",
+    "teamLink": "Navegar a coordinación del equipo",
+    "logoutButton": "Botón de cerrar sesión"
+  }
+}

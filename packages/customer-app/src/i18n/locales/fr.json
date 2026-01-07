@@ -1,0 +1,113 @@
+{
+  "common": {
+    "loading": "Chargement...",
+    "error": "Une erreur s'est produite",
+    "retry": "Réessayer",
+    "cancel": "Annuler",
+    "save": "Enregistrer",
+    "delete": "Supprimer",
+    "edit": "Modifier",
+    "confirm": "Confirmer",
+    "back": "Retour",
+    "next": "Suivant",
+    "done": "Terminé",
+    "search": "Rechercher",
+    "filter": "Filtrer"
+  },
+  "auth": {
+    "login": "Se connecter",
+    "signup": "S'inscrire",
+    "logout": "Se déconnecter",
+    "email": "E-mail",
+    "password": "Mot de passe",
+    "name": "Nom",
+    "confirmPassword": "Confirmer le mot de passe",
+    "forgotPassword": "Mot de passe oublié?",
+    "guestMode": "Continuer en tant qu'invité",
+    "loginSuccess": "Connexion réussie",
+    "signupSuccess": "Compte créé avec succès",
+    "invalidCredentials": "E-mail ou mot de passe invalide",
+    "passwordTooShort": "Le mot de passe doit contenir au moins 6 caractères"
+  },
+  "menu": {
+    "title": "Menu",
+    "item": "Article du menu",
+    "category": "Catégorie",
+    "price": "Prix",
+    "addToCart": "Ajouter au panier",
+    "inCart": "Dans le panier",
+    "outOfStock": "Rupture de stock",
+    "available": "Disponible",
+    "description": "Description",
+    "customizations": "Personnalisations",
+    "specialInstructions": "Instructions spéciales"
+  },
+  "cart": {
+    "title": "Panier",
+    "empty": "Votre panier est vide",
+    "items": "Articles",
+    "subtotal": "Sous-total",
+    "tax": "Taxe",
+    "total": "Total",
+    "checkout": "Commander",
+    "clear": "Vider le panier",
+    "remove": "Retirer l'article"
+  },
+  "orders": {
+    "title": "Commandes",
+    "noOrders": "Aucune commande pour le moment",
+    "status": "Statut",
+    "pending": "En attente",
+    "confirmed": "Confirmé",
+    "preparing": "En préparation",
+    "ready": "Prêt",
+    "completed": "Terminé",
+    "cancelled": "Annulé",
+    "orderNumber": "Numéro de commande",
+    "placedOn": "Passé le",
+    "readyForPickup": "Prêt à récupérer"
+  },
+  "map": {
+    "title": "Trouver des camions",
+    "loading": "Recherche de camions à proximité...",
+    "noTrucks": "Aucun camion à proximité",
+    "nearby": "Camions à proximité",
+    "distance": "Distance",
+    "waitTime": "Temps d'attente estimé",
+    "minutes": "minutes",
+    "km": "km"
+  },
+  "profile": {
+    "title": "Profil",
+    "editProfile": "Modifier le profil",
+    "notificationSettings": "Paramètres de notification",
+    "language": "Langue",
+    "changeLanguage": "Changer de langue"
+  },
+  "notifications": {
+    "title": "Paramètres de notification",
+    "orderUpdates": "Mises à jour de commande",
+    "orderReady": "Commande prête",
+    "promotions": "Promotions et offres",
+    "truckNearby": "Camion à proximité",
+    "orderUpdatesDesc": "Recevoir des notifications lorsque le statut de votre commande change",
+    "orderReadyDesc": "Me notifier lorsque ma commande est prête à être récupérée",
+    "promotionsDesc": "Recevoir des offres spéciales et des alertes promotionnelles",
+    "truckNearbyDesc": "Recevoir des alertes lorsqu'un camion de nourriture est à proximité"
+  },
+  "offline": {
+    "banner": "Hors ligne - Vos actions seront synchronisées lorsque la connexion sera rétablie",
+    "queued": "Hors ligne - {{count}} action en file d'attente",
+    "queuedPlural": "Hors ligne - {{count}} actions en file d'attente"
+  },
+  "accessibility": {
+    "menuItem": "Article du menu {{name}}, prix {{price}}",
+    "addToCart": "Ajouter {{name}} au panier",
+    "removeFromCart": "Retirer {{name}} du panier",
+    "cartItem": "Article du panier {{name}}, quantité {{quantity}}, prix {{price}}",
+    "orderStatus": "Statut de la commande {{id}}: {{status}}",
+    "truckMarker": "Camion de nourriture {{name}}, à {{distance}}",
+    "button": "Bouton {{label}}",
+    "link": "Lien {{label}}"
+  }
+}

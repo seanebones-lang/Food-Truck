@@ -1,0 +1,29 @@
+{
+  "common": {
+    "dashboard": "لوحة التحكم",
+    "menus": "القوائم",
+    "payments": "المدفوعات",
+    "locations": "مواقع الشاحنات",
+    "team": "تنسيق الفريق",
+    "logout": "تسجيل الخروج",
+    "save": "حفظ",
+    "cancel": "إلغاء",
+    "delete": "حذف",
+    "edit": "تعديل"
+  },
+  "dashboard": {
+    "title": "لوحة التحكم",
+    "totalRevenue": "إجمالي الإيرادات",
+    "totalOrders": "إجمالي الطلبات",
+    "completedOrders": "الطلبات المكتملة",
+    "averageOrderValue": "متوسط قيمة الطلب"
+  },
+  "accessibility": {
+    "dashboardLink": "انتقل إلى لوحة التحكم",
+    "menusLink": "انتقل إلى القوائم",
+    "paymentsLink": "انتقل إلى المدفوعات",
+    "locationsLink": "انتقل إلى مواقع الشاحنات",
+    "teamLink": "انتقل إلى تنسيق الفريق",
+    "logoutButton": "زر تسجيل الخروج"
+  }
+}

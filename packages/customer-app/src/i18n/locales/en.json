@@ -1,0 +1,113 @@
+{
+  "common": {
+    "loading": "Loading...",
+    "error": "An error occurred",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "confirm": "Confirm",
+    "back": "Back",
+    "next": "Next",
+    "done": "Done",
+    "search": "Search",
+    "filter": "Filter"
+  },
+  "auth": {
+    "login": "Login",
+    "signup": "Sign Up",
+    "logout": "Logout",
+    "email": "Email",
+    "password": "Password",
+    "name": "Name",
+    "confirmPassword": "Confirm Password",
+    "forgotPassword": "Forgot Password?",
+    "guestMode": "Continue as Guest",
+    "loginSuccess": "Logged in successfully",
+    "signupSuccess": "Account created successfully",
+    "invalidCredentials": "Invalid email or password",
+    "passwordTooShort": "Password must be at least 6 characters"
+  },
+  "menu": {
+    "title": "Menu",
+    "item": "Menu Item",
+    "category": "Category",
+    "price": "Price",
+    "addToCart": "Add to Cart",
+    "inCart": "In Cart",
+    "outOfStock": "Out of Stock",
+    "available": "Available",
+    "description": "Description",
+    "customizations": "Customizations",
+    "specialInstructions": "Special Instructions"
+  },
+  "cart": {
+    "title": "Cart",
+    "empty": "Your cart is empty",
+    "items": "Items",
+    "subtotal": "Subtotal",
+    "tax": "Tax",
+    "total": "Total",
+    "checkout": "Checkout",
+    "clear": "Clear Cart",
+    "remove": "Remove Item"
+  },
+  "orders": {
+    "title": "Orders",
+    "noOrders": "No orders yet",
+    "status": "Status",
+    "pending": "Pending",
+    "confirmed": "Confirmed",
+    "preparing": "Preparing",
+    "ready": "Ready",
+    "completed": "Completed",
+    "cancelled": "Cancelled",
+    "orderNumber": "Order Number",
+    "placedOn": "Placed On",
+    "readyForPickup": "Ready for Pickup"
+  },
+  "map": {
+    "title": "Find Trucks",
+    "loading": "Finding nearby trucks...",
+    "noTrucks": "No trucks nearby",
+    "nearby": "Nearby Trucks",
+    "distance": "Distance",
+    "waitTime": "Estimated Wait Time",
+    "minutes": "minutes",
+    "km": "km"
+  },
+  "profile": {
+    "title": "Profile",
+    "editProfile": "Edit Profile",
+    "notificationSettings": "Notification Settings",
+    "language": "Language",
+    "changeLanguage": "Change Language"
+  },
+  "notifications": {
+    "title": "Notification Settings",
+    "orderUpdates": "Order Updates",
+    "orderReady": "Order Ready",
+    "promotions": "Promotions & Deals",
+    "truckNearby": "Truck Nearby",
+    "orderUpdatesDesc": "Get notified when your order status changes",
+    "orderReadyDesc": "Notify me when my order is ready for pickup",
+    "promotionsDesc": "Receive special offers and promotional alerts",
+    "truckNearbyDesc": "Get alerts when a food truck is nearby"
+  },
+  "offline": {
+    "banner": "Offline - Your actions will sync when connection is restored",
+    "queued": "Offline - {{count}} action queued",
+    "queuedPlural": "Offline - {{count}} actions queued"
+  },
+  "accessibility": {
+    "menuItem": "Menu item {{name}}, price {{price}}",
+    "addToCart": "Add {{name}} to cart",
+    "removeFromCart": "Remove {{name}} from cart",
+    "cartItem": "Cart item {{name}}, quantity {{quantity}}, price {{price}}",
+    "orderStatus": "Order {{id}} status: {{status}}",
+    "truckMarker": "Food truck {{name}}, {{distance}} away",
+    "button": "{{label}} button",
+    "link": "{{label}} link"
+  }
+}

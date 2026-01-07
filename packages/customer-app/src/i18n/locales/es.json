@@ -1,0 +1,113 @@
+{
+  "common": {
+    "loading": "Cargando...",
+    "error": "Ocurrió un error",
+    "retry": "Reintentar",
+    "cancel": "Cancelar",
+    "save": "Guardar",
+    "delete": "Eliminar",
+    "edit": "Editar",
+    "confirm": "Confirmar",
+    "back": "Atrás",
+    "next": "Siguiente",
+    "done": "Hecho",
+    "search": "Buscar",
+    "filter": "Filtrar"
+  },
+  "auth": {
+    "login": "Iniciar Sesión",
+    "signup": "Registrarse",
+    "logout": "Cerrar Sesión",
+    "email": "Correo Electrónico",
+    "password": "Contraseña",
+    "name": "Nombre",
+    "confirmPassword": "Confirmar Contraseña",
+    "forgotPassword": "¿Olvidaste tu contraseña?",
+    "guestMode": "Continuar como Invitado",
+    "loginSuccess": "Sesión iniciada exitosamente",
+    "signupSuccess": "Cuenta creada exitosamente",
+    "invalidCredentials": "Correo electrónico o contraseña inválidos",
+    "passwordTooShort": "La contraseña debe tener al menos 6 caracteres"
+  },
+  "menu": {
+    "title": "Menú",
+    "item": "Artículo del Menú",
+    "category": "Categoría",
+    "price": "Precio",
+    "addToCart": "Agregar al Carrito",
+    "inCart": "En el Carrito",
+    "outOfStock": "Agotado",
+    "available": "Disponible",
+    "description": "Descripción",
+    "customizations": "Personalizaciones",
+    "specialInstructions": "Instrucciones Especiales"
+  },
+  "cart": {
+    "title": "Carrito",
+    "empty": "Tu carrito está vacío",
+    "items": "Artículos",
+    "subtotal": "Subtotal",
+    "tax": "Impuesto",
+    "total": "Total",
+    "checkout": "Finalizar Compra",
+    "clear": "Vaciar Carrito",
+    "remove": "Eliminar Artículo"
+  },
+  "orders": {
+    "title": "Pedidos",
+    "noOrders": "Aún no hay pedidos",
+    "status": "Estado",
+    "pending": "Pendiente",
+    "confirmed": "Confirmado",
+    "preparing": "Preparando",
+    "ready": "Listo",
+    "completed": "Completado",
+    "cancelled": "Cancelado",
+    "orderNumber": "Número de Pedido",
+    "placedOn": "Realizado el",
+    "readyForPickup": "Listo para Recoger"
+  },
+  "map": {
+    "title": "Encontrar Camiones",
+    "loading": "Buscando camiones cercanos...",
+    "noTrucks": "No hay camiones cerca",
+    "nearby": "Camiones Cercanos",
+    "distance": "Distancia",
+    "waitTime": "Tiempo de Espera Estimado",
+    "minutes": "minutos",
+    "km": "km"
+  },
+  "profile": {
+    "title": "Perfil",
+    "editProfile": "Editar Perfil",
+    "notificationSettings": "Configuración de Notificaciones",
+    "language": "Idioma",
+    "changeLanguage": "Cambiar Idioma"
+  },
+  "notifications": {
+    "title": "Configuración de Notificaciones",
+    "orderUpdates": "Actualizaciones de Pedidos",
+    "orderReady": "Pedido Listo",
+    "promotions": "Promociones y Ofertas",
+    "truckNearby": "Camión Cercano",
+    "orderUpdatesDesc": "Recibe notificaciones cuando cambie el estado de tu pedido",
+    "orderReadyDesc": "Notificarme cuando mi pedido esté listo para recoger",
+    "promotionsDesc": "Recibir ofertas especiales y alertas promocionales",
+    "truckNearbyDesc": "Recibir alertas cuando un camión de comida esté cerca"
+  },
+  "offline": {
+    "banner": "Sin conexión - Tus acciones se sincronizarán cuando se restaure la conexión",
+    "queued": "Sin conexión - {{count}} acción en cola",
+    "queuedPlural": "Sin conexión - {{count}} acciones en cola"
+  },
+  "accessibility": {
+    "menuItem": "Artículo del menú {{name}}, precio {{price}}",
+    "addToCart": "Agregar {{name}} al carrito",
+    "removeFromCart": "Eliminar {{name}} del carrito",
+    "cartItem": "Artículo del carrito {{name}}, cantidad {{quantity}}, precio {{price}}",
+    "orderStatus": "Estado del pedido {{id}}: {{status}}",
+    "truckMarker": "Camión de comida {{name}}, a {{distance}} de distancia",
+    "button": "Botón {{label}}",
+    "link": "Enlace {{label}}"
+  }
+}

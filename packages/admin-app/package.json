@@ -1,0 +1,44 @@
+{
+  "name": "admin-app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^5.3.7",
+    "@food-truck/shared": "workspace:*",
+    "@hookform/resolvers": "^3.3.4",
+    "antd": "^5.15.0",
+    "dayjs": "^1.11.10",
+    "firebase": "^10.7.1",
+    "i18next": "^23.11.5",
+    "papaparse": "^5.4.1",
+    "@sentry/react": "^8.10.0",
+    "react-i18next": "^14.1.0",
+    "@axe-core/react": "^4.9.1",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-hook-form": "^7.51.3",
+    "react-native-web": "^0.19.13",
+    "recharts": "^2.12.7",
+    "socket.io-client": "^4.7.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.6.0",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "eslint": "^9.6.0",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "vite": "^7.2.4"
+  }
+}

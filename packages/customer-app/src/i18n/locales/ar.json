@@ -1,0 +1,113 @@
+{
+  "common": {
+    "loading": "جارٍ التحميل...",
+    "error": "حدث خطأ",
+    "retry": "إعادة المحاولة",
+    "cancel": "إلغاء",
+    "save": "حفظ",
+    "delete": "حذف",
+    "edit": "تعديل",
+    "confirm": "تأكيد",
+    "back": "رجوع",
+    "next": "التالي",
+    "done": "تم",
+    "search": "بحث",
+    "filter": "تصفية"
+  },
+  "auth": {
+    "login": "تسجيل الدخول",
+    "signup": "إنشاء حساب",
+    "logout": "تسجيل الخروج",
+    "email": "البريد الإلكتروني",
+    "password": "كلمة المرور",
+    "name": "الاسم",
+    "confirmPassword": "تأكيد كلمة المرور",
+    "forgotPassword": "نسيت كلمة المرور؟",
+    "guestMode": "المتابعة كضيف",
+    "loginSuccess": "تم تسجيل الدخول بنجاح",
+    "signupSuccess": "تم إنشاء الحساب بنجاح",
+    "invalidCredentials": "البريد الإلكتروني أو كلمة المرور غير صحيحة",
+    "passwordTooShort": "يجب أن تكون كلمة المرور 6 أحرف على الأقل"
+  },
+  "menu": {
+    "title": "القائمة",
+    "item": "عنصر القائمة",
+    "category": "الفئة",
+    "price": "السعر",
+    "addToCart": "أضف إلى السلة",
+    "inCart": "في السلة",
+    "outOfStock": "نفد المخزون",
+    "available": "متاح",
+    "description": "الوصف",
+    "customizations": "التخصيصات",
+    "specialInstructions": "تعليمات خاصة"
+  },
+  "cart": {
+    "title": "السلة",
+    "empty": "السلة فارغة",
+    "items": "عناصر",
+    "subtotal": "المجموع الفرعي",
+    "tax": "الضريبة",
+    "total": "الإجمالي",
+    "checkout": "الدفع",
+    "clear": "مسح السلة",
+    "remove": "إزالة العنصر"
+  },
+  "orders": {
+    "title": "الطلبات",
+    "noOrders": "لا توجد طلبات بعد",
+    "status": "الحالة",
+    "pending": "قيد الانتظار",
+    "confirmed": "مؤكد",
+    "preparing": "قيد التحضير",
+    "ready": "جاهز",
+    "completed": "مكتمل",
+    "cancelled": "ملغي",
+    "orderNumber": "رقم الطلب",
+    "placedOn": "تم الطلب في",
+    "readyForPickup": "جاهز للاستلام"
+  },
+  "map": {
+    "title": "العثور على الشاحنات",
+    "loading": "البحث عن الشاحنات القريبة...",
+    "noTrucks": "لا توجد شاحنات قريبة",
+    "nearby": "الشاحنات القريبة",
+    "distance": "المسافة",
+    "waitTime": "وقت الانتظار المتوقع",
+    "minutes": "دقائق",
+    "km": "كم"
+  },
+  "profile": {
+    "title": "الملف الشخصي",
+    "editProfile": "تعديل الملف الشخصي",
+    "notificationSettings": "إعدادات الإشعارات",
+    "language": "اللغة",
+    "changeLanguage": "تغيير اللغة"
+  },
+  "notifications": {
+    "title": "إعدادات الإشعارات",
+    "orderUpdates": "تحديثات الطلب",
+    "orderReady": "الطلب جاهز",
+    "promotions": "العروض والصفقات",
+    "truckNearby": "شاحنة قريبة",
+    "orderUpdatesDesc": "تلقي إشعارات عند تغيير حالة طلبك",
+    "orderReadyDesc": "إشعارني عندما يكون طلبي جاهزاً للاستلام",
+    "promotionsDesc": "تلقي عروض خاصة وتنبيهات ترويجية",
+    "truckNearbyDesc": "تلقي تنبيهات عندما تكون شاحنة طعام قريبة"
+  },
+  "offline": {
+    "banner": "غير متصل - سيتم مزامنة إجراءاتك عند استعادة الاتصال",
+    "queued": "غير متصل - {{count}} إجراء في الانتظار",
+    "queuedPlural": "غير متصل - {{count}} إجراءات في الانتظار"
+  },
+  "accessibility": {
+    "menuItem": "عنصر القائمة {{name}}, السعر {{price}}",
+    "addToCart": "أضف {{name}} إلى السلة",
+    "removeFromCart": "إزالة {{name}} من السلة",
+    "cartItem": "عنصر السلة {{name}}, الكمية {{quantity}}, السعر {{price}}",
+    "orderStatus": "حالة الطلب {{id}}: {{status}}",
+    "truckMarker": "شاحنة طعام {{name}}, على بعد {{distance}}",
+    "button": "زر {{label}}",
+    "link": "رابط {{label}}"
+  }
+}

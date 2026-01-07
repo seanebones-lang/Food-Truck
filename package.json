@@ -1,0 +1,38 @@
+{
+  "name": "food-truck",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "packageManager": "yarn@1.22.0",
+  "scripts": {
+    "customer:start": "yarn workspace customer-app start",
+    "admin:dev": "yarn workspace admin-app dev",
+    "admin:build": "yarn workspace admin-app build",
+    "server:start": "node server.js",
+    "server:dev": "nodemon server.js",
+    "lint": "yarn workspaces run lint",
+    "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,css,md}\"",
+    "format:check": "prettier --check \"**/*.{js,jsx,ts,tsx,json,css,md}\"",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@sentry/node": "^8.10.0",
+    "@sentry/profiling-node": "^8.10.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "socket.io": "^4.7.2",
+    "stripe": "^14.21.0"
+  },
+  "devDependencies": {
+    "eslint": "^9.6.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.0",
+    "nodemon": "^3.0.3",
+    "prettier": "^3.2.2"
+  }
+}
