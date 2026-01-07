@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@food-truck/shared": "workspace:*",
-    "@hookform/resolvers": "^3.9.1",
+    "@hookform/resolvers": "^5.2.2",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@react-native-elements/base": "^4.0.0-rc.8",
     "@react-native-elements/themed": "^3.4.3",
