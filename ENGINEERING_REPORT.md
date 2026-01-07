@@ -1712,6 +1712,22 @@ DNS Update
 
 ---
 
+## Legal Notice
+
+**PROPRIETARY SOFTWARE - FOR SALE ONLY**
+
+This software is the proprietary property of **NextEleven LLC** and **Sean McDonnell**. 
+
+**NO UNAUTHORIZED USE OR ACCESS IS PERMITTED.** Unauthorized use, including but not limited to cloning, copying, modifying, distributing, or creating derivative works, is strictly prohibited and will be pursued to the fullest extent of the law worldwide.
+
+For licensing information, please contact: legal@nexteleven.com
+
+See [LEGAL.md](./LEGAL.md) for complete legal terms and conditions.
+
+---
+
 **Document Version:** 1.0.0  
 **Last Updated:** 2024  
 **Status:** Active Development
+
+**© 2024 NextEleven LLC and Sean McDonnell. All Rights Reserved.**
