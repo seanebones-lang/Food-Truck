@@ -16,7 +16,7 @@
   "dependencies": {
     "@ant-design/icons": "^6.0.0",
     "@food-truck/shared": "workspace:*",
-    "@hookform/resolvers": "^3.9.1",
+    "@hookform/resolvers": "^5.2.2",
     "antd": "^6.1.4",
     "dayjs": "^1.11.10",
     "firebase": "^11.2.0",
